@@ -4,9 +4,9 @@ from dotenv import load_dotenv
 
 load_dotenv(os.path.join(os.path.dirname(__file__), '..', '.env'))
 
-REDIS_HOST = os.getenv("REDIS_HOST")
-REDIS_PORT = os.getenv("REDIS_PORT")
-REDIS_PASSWORD = os.getenv("REDIS_PASSWORD")
+REDIS_HOST = str(os.getenv("REDIS_HOST"))
+REDIS_PORT = str(os.getenv("REDIS_PORT"))
+REDIS_PASSWORD = str(os.getenv("REDIS_PASSWORD"))
 
 def get_redis_url():
     if REDIS_PASSWORD:
