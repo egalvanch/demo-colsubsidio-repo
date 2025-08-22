@@ -1,6 +1,12 @@
-REDIS_HOST = "REDIS_HOST", "dummy-redis-host"
-REDIS_PORT = "REDIS_PORT", "1234"
-REDIS_PASSWORD = "REDIS_PASSWORD", "dummy-password"
+
+import os
+from dotenv import load_dotenv
+
+load_dotenv(os.path.join(os.path.dirname(__file__), '..', '.env'))
+
+REDIS_HOST = os.getenv("REDIS_HOST")
+REDIS_PORT = os.getenv("REDIS_PORT")
+REDIS_PASSWORD = os.getenv("REDIS_PASSWORD")
 
 def get_redis_url():
     if REDIS_PASSWORD:
