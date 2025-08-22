@@ -78,6 +78,11 @@ def authenticate(credentials: Optional[HTTPBasicCredentials] = Depends(security)
 
 auth_dependency = Depends(authenticate) if basic_auth else None
 
+# Create a new REDIS connection
+import aioredis
+from .config.config_redis import REDIS_URL
+
+redis = aioredis.from_url(REDIS_URL, decode_responses=True)
 
 def get_ai_project(request: Request) -> AIProjectClient:
     return request.app.state.ai_project
@@ -321,18 +326,25 @@ async def chat(
             raise HTTPException(status_code=400, detail=f"Invalid JSON in request: {e}")
 
         logger.info(f"user_message: {user_message}")
-
-        # Create a new message from the user's input.
-        try:
-            message = await agent_client.messages.create(
-                thread_id=thread_id,
-                role="user",
-                content=user_message.get('message', '')
-            )
-            logger.info(f"Created message, message ID: {message.id}")
-        except Exception as e:
-            logger.error(f"Error creating message: {e}")
-            raise HTTPException(status_code=500, detail=f"Error creating message: {e}")
+        
+        # --- Redis Cache ---
+        cache_key = f"chat:{thread_id}:{agent_id}:{user_message.get('message', '')}"
+        cached_message_id = await redis.get(cache_key)
+        if cached_message_id:
+            logger.info(f"Found cached message ID: {cached_message_id}")
+            message = await agent_client.messages.get(thread_id=thread_id, message_id=cached_message_id)
+        else:
+            # Create a new message from the user's input.
+            try:
+                message = await agent_client.messages.create(
+                    thread_id=thread_id,
+                    role="user",
+                    content=user_message.get('message', '')
+                )
+                logger.info(f"Created message, message ID: {message.id}")
+            except Exception as e:
+                logger.error(f"Error creating message: {e}")
+                raise HTTPException(status_code=500, detail=f"Error creating message: {e}")
 
         # Set the Server-Sent Events (SSE) response headers.
         headers = {
