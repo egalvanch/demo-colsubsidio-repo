@@ -32,7 +32,6 @@ from azure.ai.projects.models import (
    EvaluatorIds
 )
 
-
 # Create a logger for this module
 logger = logging.getLogger("azureaiapp")
 
@@ -77,6 +76,14 @@ def authenticate(credentials: Optional[HTTPBasicCredentials] = Depends(security)
     return
 
 auth_dependency = Depends(authenticate) if basic_auth else None
+
+# Redis connection
+import redis
+def connect_redis():
+    myHostname = str(os.getenv("REDIS_HOST"))
+    myPassword = str(os.getenv("REDIS_PASSWORD"))
+    myPort = str(os.getenv("REDIS_PORT"))
+    return redis.StrictRedis(host=myHostname, port=int(myPort), password=myPassword, ssl=True)
 
 def get_ai_project(request: Request) -> AIProjectClient:
     return request.app.state.ai_project
@@ -291,6 +298,8 @@ async def chat(
     # Retrieve the thread ID from the cookies (if available).
     thread_id = request.cookies.get('thread_id')
     agent_id = request.cookies.get('agent_id')
+    
+    r = connect_redis()
 
     with tracer.start_as_current_span("chat_request"):
         carrier = {}        
@@ -321,17 +330,31 @@ async def chat(
 
         logger.info(f"user_message: {user_message}")
         
-        # Create a new message from the user's input.
-        try:
-            message = await agent_client.messages.create(
-                thread_id=thread_id,
-                role="user",
-                content=user_message.get('message', '')
-            )
-            logger.info(f"Created message, message ID: {message.id}")
-        except Exception as e:
-            logger.error(f"Error creating message: {e}")
-            raise HTTPException(status_code=500, detail=f"Error creating message: {e}")
+        # Recupera el último mensaje del usuario desde Redis (si existe)
+        message_from_cache = r.get(f"thread:{thread_id}:last_user_message")
+        if message_from_cache:
+            message = json.loads(message_from_cache)
+            logger.info(f"Último mensaje del usuario en cache: {message}")
+        else:
+            # Create a new message from the user's input.
+            try:
+                message = await agent_client.messages.create(
+                    thread_id=thread_id,
+                    role="user",
+                    content=user_message.get('message', '')
+                )
+                logger.info(f"Created message, message ID: {message.id}")
+
+                # Cache the last user message in Redis                
+                message_cache = {
+                    "thread_id": message.thread_id,
+                    "role": message.role,
+                    "content": user_message.get('message', '')
+                }
+                r.set(f"thread:{thread_id}:last_user_message", json.dumps(message_cache))
+            except Exception as e:
+                logger.error(f"Error creating message: {e}")
+                raise HTTPException(status_code=500, detail=f"Error creating message: {e}")
 
         # Set the Server-Sent Events (SSE) response headers.
         headers = {
