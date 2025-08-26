@@ -13,7 +13,7 @@ from fastapi import Request
 from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
 
-from src.logging_config import configure_logging
+from logging_config import configure_logging
 
 enable_trace = False
 logger = None

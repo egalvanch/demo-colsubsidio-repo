@@ -275,7 +275,7 @@ async def history(
         response = agent_client.messages.list(
             thread_id=thread_id,
         )
-        for message in response:
+        async for message in response:
             formatteded_message = await get_message_and_annotations(agent_client, message)
             formatteded_message['role'] = message.role
             formatteded_message['created_at'] = message.created_at.astimezone().strftime("%m/%d/%y, %I:%M %p")
