@@ -32,7 +32,6 @@ from azure.ai.projects.models import (
    EvaluatorIds
 )
 
-
 # Create a logger for this module
 logger = logging.getLogger("azureaiapp")
 
@@ -78,6 +77,13 @@ def authenticate(credentials: Optional[HTTPBasicCredentials] = Depends(security)
 
 auth_dependency = Depends(authenticate) if basic_auth else None
 
+# Redis connection
+import redis
+def connect_redis():
+    myHostname = str(os.getenv("REDIS_HOST"))
+    myPassword = str(os.getenv("REDIS_PASSWORD"))
+    myPort = str(os.getenv("REDIS_PORT"))
+    return redis.StrictRedis(host=myHostname, port=int(myPort), password=myPassword, ssl=True)
 
 def get_ai_project(request: Request) -> AIProjectClient:
     return request.app.state.ai_project
@@ -121,40 +127,46 @@ async def get_message_and_annotations(agent_client : AgentsClient, message: Thre
     }
 
 class MyEventHandler(AsyncAgentEventHandler[str]):
-    def __init__(self, ai_project: AIProjectClient, app_insights_conn_str: str):
+    def __init__(self, ai_project: AIProjectClient, app_insights_conn_str: Optional[str]):
         super().__init__()
         self.agent_client = ai_project.agents
         self.ai_project = ai_project
-        self.app_insights_conn_str = app_insights_conn_str
+        self.app_insights_conn_str = app_insights_conn_str or ""
 
     async def on_message_delta(self, delta: MessageDeltaChunk) -> Optional[str]:
+        logger.info(f"on_message_delta: delta.text={delta.text}")
         stream_data = {'content': delta.text, 'type': "message"}
+        logger.info(f"on_message_delta: stream_data={stream_data}")
         return serialize_sse_event(stream_data)
 
     async def on_thread_message(self, message: ThreadMessage) -> Optional[str]:
         try:
-            logger.info(f"MyEventHandler: Received thread message, message ID: {message.id}, status: {message.status}")
+            logger.info(f"on_thread_message: Received thread message, message ID: {message.id}, status: {message.status}")
             if message.status != "completed":
+                logger.info("on_thread_message: message not completed, returning None")
                 return None
 
-            logger.info("MyEventHandler: Received completed message")
-
+            logger.info("on_thread_message: Received completed message, fetching annotations")
             stream_data = await get_message_and_annotations(self.agent_client, message)
+            logger.info(f"on_thread_message: stream_data={stream_data}")
             stream_data['type'] = "completed_message"
+            logger.info(f"on_thread_message: returning completed_message event")
             return serialize_sse_event(stream_data)
         except Exception as e:
             logger.error(f"Error in event handler for thread message: {e}", exc_info=True)
             return None
 
     async def on_thread_run(self, run: ThreadRun) -> Optional[str]:
-        logger.info("MyEventHandler: on_thread_run event received")
+        logger.info(f"on_thread_run: event received, status={run.status}, thread_id={run.thread_id}")
         run_information = f"ThreadRun status: {run.status}, thread ID: {run.thread_id}"
         stream_data = {'content': run_information, 'type': 'thread_run'}
         if run.status == "failed":
-            stream_data['error'] = run.last_error.as_dict()
-        # automatically run agent evaluation when the run is completed
+            logger.info(f"on_thread_run: run failed, error={run.last_error}")
+            stream_data['error'] = str(run.last_error)
         if run.status == "completed":
+            logger.info("on_thread_run: run completed, starting agent evaluation")
             run_agent_evaluation(run.thread_id, run.id, self.ai_project, self.app_insights_conn_str)
+        logger.info(f"on_thread_run: returning thread_run event")
         return serialize_sse_event(stream_data)
 
     async def on_error(self, data: str) -> Optional[str]:
@@ -200,26 +212,32 @@ async def get_result(
     carrier: Dict[str, str]
 ) -> AsyncGenerator[str, None]:
     ctx = TraceContextTextMapPropagator().extract(carrier=carrier)
+    logger.info(f"get_result: extracted context, thread_id={thread_id}, agent_id={agent_id}")
     with tracer.start_as_current_span('get_result', context=ctx):
-        logger.info(f"get_result invoked for thread_id={thread_id} and agent_id={agent_id}")
+        logger.info(f"get_result: span started for thread_id={thread_id} and agent_id={agent_id}")
         try:
             agent_client = ai_project.agents
-            async with await agent_client.runs.stream(
+            logger.info("get_result: about to await agent_client.runs.stream")
+            stream_cm = await agent_client.runs.stream(
                 thread_id=thread_id, 
                 agent_id=agent_id,
                 event_handler=MyEventHandler(ai_project, app_insight_conn_str),
-            ) as stream:
-                logger.info("Successfully created stream; starting to process events")
+            )
+            async with stream_cm as stream:
+                logger.info("get_result: Successfully created stream; starting to process events")
+                yield serialize_sse_event({'type': 'info', 'message': 'stream started'})
+                logger.info("get_result: yielded stream started event")
                 async for event in stream:
+                    logger.info(f"get_result: received event from stream: {event}")
                     _, _, event_func_return_val = event
-                    logger.debug(f"Received event: {event}")
                     if event_func_return_val:
-                        logger.info(f"Yielding event: {event_func_return_val}")
+                        logger.info(f"get_result: yielding event_func_return_val: {event_func_return_val}")
                         yield event_func_return_val
                     else:
-                        logger.debug("Event received but no data to yield")
+                        logger.info("get_result: event received but no data to yield")
+                logger.info("get_result: finished processing all events from stream")
         except Exception as e:
-            logger.exception(f"Exception in get_result: {e}")
+            logger.exception(f"get_result: Exception in get_result: {e}")
             yield serialize_sse_event({'type': "error", 'message': str(e)})
 
 
@@ -257,7 +275,7 @@ async def history(
         response = agent_client.messages.list(
             thread_id=thread_id,
         )
-        async for message in response:
+        for message in response:
             formatteded_message = await get_message_and_annotations(agent_client, message)
             formatteded_message['role'] = message.role
             formatteded_message['created_at'] = message.created_at.astimezone().strftime("%m/%d/%y, %I:%M %p")
@@ -292,6 +310,14 @@ async def chat(
     # Retrieve the thread ID from the cookies (if available).
     thread_id = request.cookies.get('thread_id')
     agent_id = request.cookies.get('agent_id')
+    
+    logger.info("Intentando conectar a Redis...")
+    try:
+        r = connect_redis()
+        logger.info("Conexión a Redis exitosa")
+    except Exception as e:
+        logger.error(f"Error al conectar a Redis: {e}")
+        raise HTTPException(status_code=500, detail=f"Error al conectar a Redis: {e}")
 
     with tracer.start_as_current_span("chat_request"):
         carrier = {}        
@@ -300,12 +326,15 @@ async def chat(
         # Attempt to get an existing thread. If not found, create a new one.
         try:
             agent_client = ai_project.agents
+            logger.info("Preparando para obtener o crear thread...")
             if thread_id and agent_id == agent.id:
                 logger.info(f"Retrieving thread with ID {thread_id}")
                 thread = await agent_client.threads.get(thread_id)
+                logger.info(f"Thread obtenido: {thread}")
             else:
                 logger.info("Creating a new thread")
                 thread = await agent_client.threads.create()
+                logger.info(f"Thread creado: {thread}")
         except Exception as e:
             logger.error(f"Error handling thread: {e}")
             raise HTTPException(status_code=400, detail=f"Error handling thread: {e}")
@@ -321,18 +350,53 @@ async def chat(
             raise HTTPException(status_code=400, detail=f"Invalid JSON in request: {e}")
 
         logger.info(f"user_message: {user_message}")
-
-        # Create a new message from the user's input.
+        
+        # Recupera el último mensaje del usuario desde Redis (si existe)
+        logger.info(f"Buscando último mensaje en Redis para thread:{thread_id}:last_user_message")
         try:
-            message = await agent_client.messages.create(
-                thread_id=thread_id,
-                role="user",
-                content=user_message.get('message', '')
-            )
-            logger.info(f"Created message, message ID: {message.id}")
+            message_from_cache = r.get(f"thread:{thread_id}:last_user_message")
+            logger.info(f"Valor crudo de Redis: {message_from_cache} (type: {type(message_from_cache)})")
         except Exception as e:
-            logger.error(f"Error creating message: {e}")
-            raise HTTPException(status_code=500, detail=f"Error creating message: {e}")
+            logger.error(f"Error al leer de Redis: {e}")
+            message_from_cache = None
+        message = None
+        if message_from_cache:
+            try:
+                # Si es bytes, decodifica; si es str, usa directo
+                if isinstance(message_from_cache, bytes):
+                    message_str = message_from_cache.decode("utf-8")
+                else:
+                    message_str = message_from_cache
+                message = json.loads(message_str)
+                logger.info(f"Último mensaje del usuario en cache: {message}")
+            except Exception as e:
+                logger.error(f"Error decodificando mensaje de Redis: {e}")
+                message = None
+        if not message:
+            # Create a new message from the user's input.
+            try:
+                logger.info("Creando nuevo mensaje de usuario en el thread...")
+                message = await agent_client.messages.create(
+                    thread_id=thread_id,
+                    role="user",
+                    content=user_message.get('message', '')
+                )
+                logger.info(f"Created message, message ID: {message.id}")
+
+                # Cache the last user message en Redis                
+                message_cache = {
+                    "thread_id": message.thread_id,
+                    "role": message.role,
+                    "content": user_message.get('message', '')
+                }
+                try:
+                    r.set(f"thread:{thread_id}:last_user_message", json.dumps(message_cache))
+                    logger.info("Mensaje cacheado en Redis correctamente")
+                except Exception as e:
+                    logger.error(f"Error cacheando mensaje en Redis: {e}")
+            except Exception as e:
+                logger.error(f"Error creating message: {e}")
+                raise HTTPException(status_code=500, detail=f"Error creating message: {e}")
 
         # Set the Server-Sent Events (SSE) response headers.
         headers = {
@@ -370,28 +434,24 @@ def run_agent_evaluation(
                 "TaskAdherence": {"Id": EvaluatorIds.TASK_ADHERENCE.value},
                 "ToolCallAccuracy": {"Id": EvaluatorIds.TOOL_CALL_ACCURACY.value},
             },
-            sampling_configuration=AgentEvaluationSamplingConfiguration(
-                name="default",
-                sampling_percent=100,
-            ),
+            sampling_configuration=None,
             redaction_configuration=AgentEvaluationRedactionConfiguration(
                 redact_score_properties=False,
             ),
             app_insights_connection_string=app_insights_conn_str,
         )
-        
-        async def run_evaluation():
+        def run_evaluation():
             try:        
                 logger.info(f"Running agent evaluation on thread ID {thread_id} and run ID {run_id}")
-                agent_evaluation_response = await ai_project.evaluations.create_agent_evaluation(
+                agent_evaluation_response = ai_project.evaluations.create_agent_evaluation(
                     evaluation=agent_evaluation_request
                 )
                 logger.info(f"Evaluation response: {agent_evaluation_response}")
             except Exception as e:
                 logger.error(f"Error creating agent evaluation: {e}")
 
-        # Create a new task to run the evaluation asynchronously
-        asyncio.create_task(run_evaluation())
+        # Run the evaluation synchronously (no await)
+        run_evaluation()
 
 
 @router.get("/config/azure")
