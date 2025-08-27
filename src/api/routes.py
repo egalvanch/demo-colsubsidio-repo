@@ -5,6 +5,7 @@ import asyncio
 import json
 import os
 from typing import AsyncGenerator, Optional, Dict
+import io
 
 import fastapi
 from fastapi import Request, Depends, HTTPException
@@ -84,6 +85,12 @@ def connect_redis():
     myPassword = str(os.getenv("REDIS_PASSWORD"))
     myPort = str(os.getenv("REDIS_PORT"))
     return redis.StrictRedis(host=myHostname, port=int(myPort), password=myPassword, ssl=True)
+
+def message_in_cache(message: str) -> bool:
+    return connect_redis().exists(message)
+    
+def set_redis_cache(message: str, response: str) -> None:
+    return connect_redis().set(message, response, ex=3600)
 
 def get_ai_project(request: Request) -> AIProjectClient:
     return request.app.state.ai_project
@@ -204,6 +211,7 @@ async def index(request: Request, _ = auth_dependency):
 
 
 async def get_result(
+    request_str: str,
     request: Request, 
     thread_id: str, 
     agent_id: str, 
@@ -213,6 +221,8 @@ async def get_result(
 ) -> AsyncGenerator[str, None]:
     ctx = TraceContextTextMapPropagator().extract(carrier=carrier)
     logger.info(f"get_result: extracted context, thread_id={thread_id}, agent_id={agent_id}")
+    full_message = ""  # <-- Acumulador para el mensaje generado
+    
     with tracer.start_as_current_span('get_result', context=ctx):
         logger.info(f"get_result: span started for thread_id={thread_id} and agent_id={agent_id}")
         try:
@@ -231,7 +241,13 @@ async def get_result(
                     logger.info(f"get_result: received event from stream: {event}")
                     _, _, event_func_return_val = event
                     if event_func_return_val:
-                        logger.info(f"get_result: yielding event_func_return_val: {event_func_return_val}")
+                        # Extrae el texto del chunk y acumúlalo
+                        try:
+                            data = json.loads(event_func_return_val.replace("data: ", "").strip())
+                            if data.get("type") == "message" and "content" in data:
+                                full_message += data["content"]
+                        except Exception as e:
+                            logger.warning(f"No se pudo parsear chunk SSE: {e}")
                         yield event_func_return_val
                     else:
                         logger.info("get_result: event received but no data to yield")
@@ -239,6 +255,22 @@ async def get_result(
         except Exception as e:
             logger.exception(f"get_result: Exception in get_result: {e}")
             yield serialize_sse_event({'type': "error", 'message': str(e)})
+    # Al finalizar el stream, guarda el mensaje completo en Redis
+    if full_message:
+        #print(f"full_message to cache: {full_message}")
+        redis = connect_redis()
+        original_from_cache = redis.get(f"thread:{thread_id}:rol:visitante")
+        if original_from_cache:
+            message_for_cache = json.loads(original_from_cache)
+            message_for_cache.append(
+                {"user_message": request_str, "content": full_message}
+            )
+        else:
+            message_for_cache = [
+                {"user_message": request_str, "content": full_message}
+            ]
+        #print(f"message_for_cache to set in redis: {message_for_cache}")
+        redis.set(f"thread:{thread_id}:rol:visitante", json.dumps(message_for_cache), ex=3600)
 
 
 @router.get("/chat/history")
@@ -311,14 +343,6 @@ async def chat(
     thread_id = request.cookies.get('thread_id')
     agent_id = request.cookies.get('agent_id')
     
-    logger.info("Intentando conectar a Redis...")
-    try:
-        r = connect_redis()
-        logger.info("Conexión a Redis exitosa")
-    except Exception as e:
-        logger.error(f"Error al conectar a Redis: {e}")
-        raise HTTPException(status_code=500, detail=f"Error al conectar a Redis: {e}")
-
     with tracer.start_as_current_span("chat_request"):
         carrier = {}        
         TraceContextTextMapPropagator().inject(carrier)
@@ -345,58 +369,68 @@ async def chat(
         # Parse the JSON from the request.
         try:
             user_message = await request.json()
+            request_str = user_message.get('message', '')
         except Exception as e:
             logger.error(f"Invalid JSON in request: {e}")
             raise HTTPException(status_code=400, detail=f"Invalid JSON in request: {e}")
 
         logger.info(f"user_message: {user_message}")
         
-        # Recupera el último mensaje del usuario desde Redis (si existe)
-        logger.info(f"Buscando último mensaje en Redis para thread:{thread_id}:last_user_message")
+        # Connect to Redis
+        logger.info("Intentando conectar a Redis...")
         try:
-            message_from_cache = r.get(f"thread:{thread_id}:last_user_message")
-            logger.info(f"Valor crudo de Redis: {message_from_cache} (type: {type(message_from_cache)})")
+            redis = connect_redis()
+            logger.info("Conexión a Redis exitosa")
+        except Exception as e:
+            logger.error(f"Error al conectar a Redis: {e}")
+            raise HTTPException(status_code=500, detail=f"Error al conectar a Redis: {e}")
+        
+        # Recupera el último mensaje del usuario desde Redis (si existe)
+        logger.info(f"Buscando último mensaje en Redis para thread:{thread_id}")
+        try:
+            message_from_cache = redis.get(f"thread:{thread_id}:rol:visitante")
+            #print(f"message_from_cache obtenido de redis: {message_from_cache}; type: {type(message_from_cache)}")
+            message_from_cache_object = json.loads(message_from_cache)
+            #print(f"message_from_cache_object parseado: {message_from_cache_object}; type: {type(message_from_cache_object)}")
+            
+            for message in message_from_cache_object:
+                if message['user_message'].strip().lower() == request_str.strip().lower():
+                    print(f"El mensaje en cache coincide con el mensaje actual del usuario: {message['user_message']} == {request_str}")
+                    message_from_cache = message
+                    message_content = message['content']
+                    break
+                else:
+                    message_from_cache = None
+                    #logger.info("El mensaje en cache no coincide con el mensaje actual del usuario.")
         except Exception as e:
             logger.error(f"Error al leer de Redis: {e}")
             message_from_cache = None
-        message = None
-        if message_from_cache:
-            try:
-                # Si es bytes, decodifica; si es str, usa directo
-                if isinstance(message_from_cache, bytes):
-                    message_str = message_from_cache.decode("utf-8")
-                else:
-                    message_str = message_from_cache
-                message = json.loads(message_str)
-                logger.info(f"Último mensaje del usuario en cache: {message}")
-            except Exception as e:
-                logger.error(f"Error decodificando mensaje de Redis: {e}")
-                message = None
-        if not message:
-            # Create a new message from the user's input.
-            try:
-                logger.info("Creando nuevo mensaje de usuario en el thread...")
-                message = await agent_client.messages.create(
-                    thread_id=thread_id,
-                    role="user",
-                    content=user_message.get('message', '')
-                )
-                logger.info(f"Created message, message ID: {message.id}")
-
-                # Cache the last user message en Redis                
-                message_cache = {
-                    "thread_id": message.thread_id,
-                    "role": message.role,
-                    "content": user_message.get('message', '')
-                }
-                try:
-                    r.set(f"thread:{thread_id}:last_user_message", json.dumps(message_cache))
-                    logger.info("Mensaje cacheado en Redis correctamente")
-                except Exception as e:
-                    logger.error(f"Error cacheando mensaje en Redis: {e}")
-            except Exception as e:
-                logger.error(f"Error creating message: {e}")
-                raise HTTPException(status_code=500, detail=f"Error creating message: {e}")
+        # message = None
+        # if message_from_cache:
+        #     try:
+        #         # Si es bytes, decodifica; si es str, usa directo
+        #         if isinstance(message_from_cache, bytes):
+        #             message_str = message_from_cache.decode("utf-8")
+        #         else:
+        #             message_str = message_from_cache
+        #         message = json.loads(message_str)
+        #         logger.info(f"Último mensaje del usuario en cache: {message}")
+        #     except Exception as e:
+        #         logger.error(f"Error decodificando mensaje de Redis: {e}")
+        #         message = None
+        # if not message:
+        #     # Create a new message from the user's input.
+        #     try:
+        #         logger.info("Creando nuevo mensaje de usuario en el thread...")
+        #         message = await agent_client.messages.create(
+        #             thread_id=thread_id,
+        #             role="user",
+        #             content=user_message.get('message', '')
+        #         )
+        #         logger.info(f"Created message, message ID: {message.id}")
+        #     except Exception as e:
+        #         logger.error(f"Error creating message: {e}")
+        #         raise HTTPException(status_code=500, detail=f"Error creating message: {e}")
 
         # Set the Server-Sent Events (SSE) response headers.
         headers = {
@@ -406,13 +440,29 @@ async def chat(
         }
         logger.info(f"Starting streaming response for thread ID {thread_id}")
 
-        # Create the streaming response using the generator.
-        response = StreamingResponse(get_result(request, thread_id, agent_id, ai_project, app_insights_conn_str, carrier), headers=headers)
+        if message_from_cache:
+            print(f"Usando mensaje de cache: {message_content}")
+            #message_content = "Mensaje de prueba"
+            response = StreamingResponse(string_streamer(message_content), headers=headers, media_type="text/event-stream")
+        else:
+            # Create the streaming response using the generator.
+            response = StreamingResponse(get_result(request_str, request, thread_id, agent_id, ai_project, app_insights_conn_str, carrier), headers=headers)
 
         # Update cookies to persist the thread and agent IDs.
         response.set_cookie("thread_id", thread_id)
         response.set_cookie("agent_id", agent_id)
+        
+        print(f"El tipo de response es: {type(response)}")
+        
         return response
+    
+def string_streamer(text: str):
+    data = {
+        "type": "completed_message", 
+        "role": "assistant",
+        "content": text
+    }
+    yield f"data: {json.dumps(data)}\n\n"
 
 def read_file(path: str) -> str:
     with open(path, 'r') as file:

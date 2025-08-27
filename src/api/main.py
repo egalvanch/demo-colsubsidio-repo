@@ -12,6 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi import Request
 from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
+from fastapi.middleware.cors import CORSMiddleware
 
 from logging_config import configure_logging
 
@@ -117,6 +118,14 @@ def create_app():
     directory = os.path.join(os.path.dirname(__file__), "static")
     app = fastapi.FastAPI(lifespan=lifespan)
     app.mount("/static", StaticFiles(directory=directory), name="static")
+    # Permitir CORS para desarrollo local
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["http://localhost:5173"],  # Cambia el puerto si usas otro
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
     
     # Mount React static files
     # Uncomment the following lines if you have a React frontend
