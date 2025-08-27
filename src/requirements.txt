@@ -15,3 +15,4 @@ opentelemetry-sdk
 setuptools==80.9.0
 starlette>=0.40.0 # fix vulnerability
 jinja2 # new dependent of fastapi
+redis

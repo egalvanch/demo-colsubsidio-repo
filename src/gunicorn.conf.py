@@ -27,6 +27,7 @@ from azure.core.credentials_async import AsyncTokenCredential
 from dotenv import load_dotenv
 
 from logging_config import configure_logging
+from api.azure_transport import CustomAzureTransport
 
 load_dotenv()
 
@@ -188,7 +189,8 @@ async def initialize_resources():
                 exclude_shared_token_cache_credential=True) as creds:
             async with AIProjectClient(
                 credential=creds,
-                endpoint=proj_endpoint
+                endpoint=proj_endpoint,
+                transport=CustomAzureTransport()  # Use custom transport
             ) as ai_client:
                 # If the environment already has AZURE_AI_AGENT_ID or AZURE_EXISTING_AGENT_ID, try
                 # fetching that agent
