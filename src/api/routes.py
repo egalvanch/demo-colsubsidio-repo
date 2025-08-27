@@ -257,7 +257,7 @@ async def get_result(
             yield serialize_sse_event({'type': "error", 'message': str(e)})
     # Al finalizar el stream, guarda el mensaje completo en Redis
     if full_message:
-        print(f"full_message to cache: {full_message}")
+        #print(f"full_message to cache: {full_message}")
         redis = connect_redis()
         original_from_cache = redis.get(f"thread:{thread_id}:rol:visitante")
         if original_from_cache:
@@ -269,7 +269,7 @@ async def get_result(
             message_for_cache = [
                 {"user_message": request_str, "content": full_message}
             ]
-        print(f"message_for_cache to set in redis: {message_for_cache}")
+        #print(f"message_for_cache to set in redis: {message_for_cache}")
         redis.set(f"thread:{thread_id}:rol:visitante", json.dumps(message_for_cache), ex=3600)
 
 
@@ -389,19 +389,19 @@ async def chat(
         logger.info(f"Buscando último mensaje en Redis para thread:{thread_id}")
         try:
             message_from_cache = redis.get(f"thread:{thread_id}:rol:visitante")
-            print(f"message_from_cache obtenido de redis: {message_from_cache}; type: {type(message_from_cache)}")
+            #print(f"message_from_cache obtenido de redis: {message_from_cache}; type: {type(message_from_cache)}")
             message_from_cache_object = json.loads(message_from_cache)
-            print(f"message_from_cache_object parseado: {message_from_cache_object}; type: {type(message_from_cache_object)}")
+            #print(f"message_from_cache_object parseado: {message_from_cache_object}; type: {type(message_from_cache_object)}")
             
             for message in message_from_cache_object:
-                if message['user_message'].strip() == request_str.strip():
+                if message['user_message'].strip().lower() == request_str.strip().lower():
                     print(f"El mensaje en cache coincide con el mensaje actual del usuario: {message['user_message']} == {request_str}")
                     message_from_cache = message
                     message_content = message['content']
                     break
                 else:
                     message_from_cache = None
-                    logger.info("El mensaje en cache no coincide con el mensaje actual del usuario.")
+                    #logger.info("El mensaje en cache no coincide con el mensaje actual del usuario.")
         except Exception as e:
             logger.error(f"Error al leer de Redis: {e}")
             message_from_cache = None
@@ -442,7 +442,8 @@ async def chat(
 
         if message_from_cache:
             print(f"Usando mensaje de cache: {message_content}")
-            response = StreamingResponse(string_streamer(message_content), headers=headers, media_type="text/plain")
+            #message_content = "Mensaje de prueba"
+            response = StreamingResponse(string_streamer(message_content), headers=headers, media_type="text/event-stream")
         else:
             # Create the streaming response using the generator.
             response = StreamingResponse(get_result(request_str, request, thread_id, agent_id, ai_project, app_insights_conn_str, carrier), headers=headers)
@@ -456,7 +457,12 @@ async def chat(
         return response
     
 def string_streamer(text: str):
-    yield text
+    data = {
+        "type": "completed_message", 
+        "role": "assistant",
+        "content": text
+    }
+    yield f"data: {json.dumps(data)}\n\n"
 
 def read_file(path: str) -> str:
     with open(path, 'r') as file:
