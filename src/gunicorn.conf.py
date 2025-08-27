@@ -236,7 +236,7 @@ def on_starting(server):
 max_requests = 1000
 max_requests_jitter = 50
 log_file = "-"
-bind = "0.0.0.0:50505"
+bind = "0.0.0.0:80"
 
 if not os.getenv("RUNNING_IN_PRODUCTION"):
     reload = True

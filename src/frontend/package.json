@@ -4,11 +4,12 @@
   "description": "React frontend for Azure AI Agents Demo",
   "main": "index.js",
   "scripts": {
-    "dev": "vite",
-    "build": "tsc && vite build",
-    "setup": "npm install -g pnpm@10.4.1 && pnpm install && pnpm build",
-    "preview": "vite preview",
-    "typecheck": "tsc --noEmit"
+  "dev": "vite",
+  "start": "vite",
+  "build": "tsc && vite build",
+  "setup": "npm install -g pnpm@10.4.1 && pnpm install && pnpm build",
+  "preview": "vite preview",
+  "typecheck": "tsc --noEmit"
   },
   "keywords": [],
   "author": "",

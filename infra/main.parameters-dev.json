@@ -1,0 +1,8 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "principalId": { "value": "d3de1e28-5caa-43de-a87e-235fa3bc11b1" },
+    "resourceGroupName": { "value": "rg-ai-agents-dev-2" }
+  }
+}
