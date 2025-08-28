@@ -114,8 +114,8 @@ def _init_redis_once() -> None:
             port=int(port),
             password=str(pwd),
             ssl=True,
-            socket_timeout=3,           # defensivo
-            socket_connect_timeout=3,   # defensivo
+            socket_timeout=3,
+            socket_connect_timeout=3,
             retry_on_timeout=True
         )
         # Probar ping sin romper la petición
@@ -137,6 +137,9 @@ def get_redis_client() -> Optional[redis.StrictRedis]:
         _init_redis_once()
     return _redis_client if _CACHE_ENABLED else None
 
+# ------------------------------------------------------------------------------
+# Cache helpers
+# ------------------------------------------------------------------------------
 def normalize_message(text: str) -> str:
     return (text or "").strip().lower()
 
@@ -144,6 +147,11 @@ def cache_key(thread_id: str, user_message: str) -> str:
     normalized = normalize_message(user_message)
     digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
     return f"thread:{thread_id}:msg:{digest}"
+
+def faq_cache_key(user_message: str) -> str:
+    normalized = normalize_message(user_message)
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+    return f"faq:msg:{digest}"
 
 def get_cached_response(key: str) -> Optional[str]:
     client = get_redis_client()
@@ -168,6 +176,31 @@ def set_cached_response(key: str, content: str, ttl: int = _CACHE_TTL) -> None:
         client.set(key, content, ex=ttl)
     except Exception as e:
         logger.warning(f"Redis SET failed for key={key}: {e}")
+
+# ------------------------------------------------------------------------------
+# FAQ precargadas desde JSON
+# ------------------------------------------------------------------------------
+FAQS_FILE = os.path.join(os.path.dirname(__file__), "faqs.json")
+
+def load_faqs() -> Dict[str, str]:
+    try:
+        with open(FAQS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        logger.warning(f"No se pudo cargar faqs.json: {e}")
+        return {}
+
+def preload_faqs():
+    """Carga las FAQs desde JSON en Redis si no existen"""
+    client = get_redis_client()
+    if not client:
+        return
+    faqs = load_faqs()
+    for question, answer in faqs.items():
+        key = faq_cache_key(question)
+        if not client.exists(key):
+            client.set(key, answer, ex=_CACHE_TTL)
+            logger.info(f"FAQ precargada en cache: {question}")
 
 # ------------------------------------------------------------------------------
 # SSE helper
@@ -398,26 +431,31 @@ async def chat(
         if not request_str:
             raise HTTPException(status_code=400, detail="Empty 'message' is not allowed.")
 
-        # Cache lookup
-        key = cache_key(thread_id, request_str)
-        cached = get_cached_response(key)
-
         headers = {
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
             "Content-Type": "text/event-stream",
-            # Opcional: evita buffering en proxies reversos como Nginx
             "X-Accel-Buffering": "no",
         }
 
-        # Si hay caché, responder de inmediato
+        # 1. Buscar en FAQ global
+        faq_key = faq_cache_key(request_str)
+        faq_cached = get_cached_response(faq_key)
+        if faq_cached:
+            print("Respuesta encontrada en FAQ cache")
+            response = StreamingResponse(string_streamer(faq_cached), headers=headers, media_type="text/event-stream")
+            response.set_cookie("thread_id", thread_id)
+            response.set_cookie("agent_id", agent_id)
+            return response
+
+        # 2. Buscar en cache local de thread
+        key = cache_key(thread_id, request_str)
+        cached = get_cached_response(key)
         if cached:
-            logger.info(f"Cache hit for key={key}")
+            print("Respuesta encontrada en cache local de thread")
             response = StreamingResponse(string_streamer(cached), headers=headers, media_type="text/event-stream")
         else:
-            logger.info(f"Cache miss for key={key}. Creating user message and running stream.")
-
-            # IMPORTANTE: Crea el mensaje del usuario en el thread (estaba comentado en tu versión)
+            print("Enviando respuesta desde el agente")
             try:
                 await agent_client.messages.create(
                     thread_id=thread_id,
@@ -428,7 +466,6 @@ async def chat(
                 logger.error(f"Error creating user message in thread: {e}")
                 raise HTTPException(status_code=500, detail=f"Error creating message: {e}")
 
-            # Stream + cache al finalizar
             response = StreamingResponse(
                 get_result(
                     request_str=request_str,
@@ -487,4 +524,3 @@ def run_agent_evaluation(
         except Exception as e:
             logger.error(f"Error creating agent evaluation: {e}")
 
-    _run()
