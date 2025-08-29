@@ -310,7 +310,7 @@ async def get_result(
             yield serialize_sse_event({"type": "error", "message": str(e)})
 
     # Guardar solo si no es fallback
-    fallback_text = "¡Uy! No encontré esa info en Colsubsidio.com"
+    fallback_text = "¡Uy! No encontré esa info"
     if cache_store_key and full_message and not full_message.strip().startswith(fallback_text):
         set_cached_response(cache_store_key, full_message)
         # También guardamos en cache global FAQ
