@@ -177,18 +177,11 @@ def set_cached_response(key: str, content: str, ttl: int = _CACHE_TTL) -> None:
         logger.warning(f"Redis SET failed for key={key}: {e}")
 
 # ------------------------------------------------------------------------------
-# FAQs globales en cache
+# FAQs iniciales en cache
 # ------------------------------------------------------------------------------
-# Diccionario fijo de FAQs iniciales
-INITIAL_FAQS: Dict[str, str] = {
-    "como me afilio a colsubsidio" : "¡Hola! Para afiliarte a Colsubsidio, puedes hacerlo fácilmente en línea. Aquí te dejo los pasos para que lo hagas sin complicaciones:\nIngresa a tu cuenta en el portal transaccional de Colsubsidio. Si no tienes cuenta, primero deberás crear una.\nSelecciona la opción \"Afiliar a beneficiario\" dentro del portal.\nDiligencia el formulario de afiliación con los datos correctos.\nFinaliza el proceso asegurándote de que toda la información sea correcta y haz clic en \"Afiliar\".\nTen en cuenta que debes tener a mano algunos documentos como el registro civil del beneficiario y la copia del documento de identidad. Si todo está en orden, recibirás un mensaje de confirmación una vez que tu afiliación sea exitosa. Si quieres más detalles, puedes visitar el siguiente enlace: Colsubsidio - Afiliaciones ¡Espero que esto te ayude! Si necesitas algo más, no dudes en preguntar. 😊",
-    "Que beneficios tengo en colsubsidio" : "Colsubsidio ofrece una variedad de beneficios para sus afiliados. Algunos de los más destacados incluyen:\n\n1. **Atención médica**: Acceso a servicios de salud, incluyendo consultas médicas, tratamientos y medicamentos a precios subsidiados.\n\n2. **Educación**: Oportunidades de formación y capacitación, así como subsidios para la educación de tus hijos.\n\n3. **Recreación**: Descuentos en actividades recreativas y culturales, así como acceso a instalaciones deportivas.\n\n4. **Asesoría legal**: Servicios de orientación y asesoría en temas legales y laborales.\n\n5. **Créditos y subsidios**: Posibilidad de acceder a créditos y subsidios para vivienda, educación y emprendimiento.\n\nPara más información sobre todos los beneficios disponibles, te recomiendo visitar el portal de Colsubsidio o comunicarte con su línea de atención al cliente. ¡Espero que esta información te sea útil! 😊",
-    "Que beneficios tengo":"Colsubsidio ofrece una variedad de beneficios para sus afiliados. Algunos de los más destacados incluyen:\n\n1. **Atención médica**: Acceso a servicios de salud, incluyendo consultas médicas, tratamientos y medicamentos a precios subsidiados.\n\n2. **Educación**: Oportunidades de formación y capacitación, así como subsidios para la educación de tus hijos.\n\n3. **Recreación**: Descuentos en actividades recreativas y culturales, así como acceso a instalaciones deportivas.\n\n4. **Asesoría legal**: Servicios de orientación y asesoría en temas legales y laborales.\n\n5. **Créditos y subsidios**: Posibilidad de acceder a créditos y subsidios para vivienda, educación y emprendimiento.\n\nPara más información sobre todos los beneficios disponibles, te recomiendo visitar el portal de Colsubsidio o comunicarte con su línea de atención al cliente. ¡Espero que esta información te sea útil! 😊",
-    "como me afilio":"¡Hola! Para afiliarte a Colsubsidio, puedes hacerlo fácilmente en línea. Aquí te dejo los pasos para que lo hagas sin complicaciones:\nIngresa a tu cuenta en el portal transaccional de Colsubsidio. Si no tienes cuenta, primero deberás crear una.\nSelecciona la opción \"Afiliar a beneficiario\" dentro del portal.\nDiligencia el formulario de afiliación con los datos correctos.\nFinaliza el proceso asegurándote de que toda la información sea correcta y haz clic en \"Afiliar\".\nTen en cuenta que debes tener a mano algunos documentos como el registro civil del beneficiario y la copia del documento de identidad. Si todo está en orden, recibirás un mensaje de confirmación una vez que tu afiliación sea exitosa. Si quieres más detalles, puedes visitar el siguiente enlace: Colsubsidio - Afiliaciones ¡Espero que esto te ayude! Si necesitas algo más, no dudes en preguntar. 😊"
-}
+INITIAL_FAQS: Dict[str, str] = {}
 
 def preload_faqs():
-    """Carga las FAQs iniciales en Redis si no existen"""
     client = get_redis_client()
     if not client:
         logger.warning("Redis no disponible, no se cargaron FAQs iniciales.")
@@ -220,7 +213,6 @@ async def get_message_and_annotations(agent_client: AgentsClient, message: Threa
     annotations = []
     for ann in (a.as_dict() for a in message.file_citation_annotations):
         file_id = ann["file_citation"]["file_id"]
-        logger.info(f"Fetching file for annotation: {file_id}")
         try:
             openai_file = await agent_client.files.get(file_id)
             ann["file_name"] = openai_file.filename
@@ -244,19 +236,14 @@ class MyEventHandler(AsyncAgentEventHandler[str]):
         self.app_insights_conn_str = app_insights_conn_str or ""
 
     async def on_message_delta(self, delta: MessageDeltaChunk) -> Optional[str]:
-        stream_data = {"content": delta.text, "type": "message"}
-        return serialize_sse_event(stream_data)
+        return serialize_sse_event({"content": delta.text, "type": "message"})
 
     async def on_thread_message(self, message: ThreadMessage) -> Optional[str]:
-        try:
-            if message.status != "completed":
-                return None
-            stream_data = await get_message_and_annotations(self.agent_client, message)
-            stream_data["type"] = "completed_message"
-            return serialize_sse_event(stream_data)
-        except Exception as e:
-            logger.error(f"Error in on_thread_message: {e}", exc_info=True)
+        if message.status != "completed":
             return None
+        stream_data = await get_message_and_annotations(self.agent_client, message)
+        stream_data["type"] = "completed_message"
+        return serialize_sse_event(stream_data)
 
     async def on_thread_run(self, run: ThreadRun) -> Optional[str]:
         stream_data = {"content": f"ThreadRun status: {run.status}, thread ID: {run.thread_id}", "type": "thread_run"}
@@ -273,24 +260,11 @@ class MyEventHandler(AsyncAgentEventHandler[str]):
     async def on_done(self) -> Optional[str]:
         return serialize_sse_event({"type": "stream_end"})
 
-    async def on_run_step(self, step: RunStep) -> Optional[str]:
-        try:
-            step_details = step.get("step_details", {})
-            tool_calls = step_details.get("tool_calls", [])
-            for call in tool_calls:
-                azure_ai_search_details = call.get("azure_ai_search", {})
-                if azure_ai_search_details:
-                    logger.info(f"azure_ai_search input: {azure_ai_search_details.get('input')}")
-        except Exception:
-            pass
-        return None
-
 # ------------------------------------------------------------------------------
 # Routes
 # ------------------------------------------------------------------------------
 @router.on_event("startup")
 async def startup_event():
-    """Cargar FAQs iniciales en Redis al iniciar la app"""
     preload_faqs()
 
 @router.get("/", response_class=HTMLResponse)
@@ -307,7 +281,6 @@ async def get_result(
     carrier: Dict[str, str],
     cache_store_key: Optional[str] = None
 ) -> AsyncGenerator[str, None]:
-    """Streams the agent's response and caches the final assembled text."""
     ctx = TraceContextTextMapPropagator().extract(carrier=carrier)
     full_message = ""
 
@@ -320,69 +293,29 @@ async def get_result(
                 event_handler=MyEventHandler(ai_project, app_insight_conn_str),
             )
             async with stream_cm as stream:
-                # Informar inicio de stream
                 yield serialize_sse_event({"type": "info", "message": "stream started"})
                 async for event in stream:
                     _, _, event_func_return_val = event
                     if not event_func_return_val:
                         continue
-                    # Acumular texto de chunks "message"
                     try:
                         data = json.loads(event_func_return_val.replace("data: ", "").strip())
                         if data.get("type") == "message" and "content" in data:
                             full_message += data["content"]
                     except Exception:
-                        # No bloquea el stream si no se pudo parsear un chunk
                         pass
                     yield event_func_return_val
         except Exception as e:
             logger.exception(f"get_result: Exception: {e}")
             yield serialize_sse_event({"type": "error", "message": str(e)})
 
-    # Cachear al final
-    if cache_store_key and full_message:
+    # Guardar solo si no es fallback
+    fallback_text = "¡Uy! No encontré esa info en Colsubsidio.com"
+    if cache_store_key and full_message and not full_message.strip().startswith(fallback_text):
         set_cached_response(cache_store_key, full_message)
-
-@router.get("/chat/history")
-async def history(
-    request: Request,
-    ai_project: AIProjectClient = Depends(get_ai_project),
-    agent: Agent = Depends(get_agent),
-    _ = auth_dependency
-):
-    with tracer.start_as_current_span("chat_history"):
-        thread_id = request.cookies.get("thread_id")
-        agent_id = request.cookies.get("agent_id")
-
-        try:
-            agent_client = ai_project.agents
-            if thread_id and agent_id == agent.id:
-                thread = await agent_client.threads.get(thread_id)
-            else:
-                thread = await agent_client.threads.create()
-        except Exception as e:
-            logger.error(f"Error handling thread: {e}")
-            raise HTTPException(status_code=400, detail=f"Error handling thread: {e}")
-
-        thread_id = thread.id
-        agent_id = agent.id
-
-    try:
-        content = []
-        response = agent_client.messages.list(thread_id=thread_id)
-        async for message in response:
-            formatted = await get_message_and_annotations(agent_client, message)
-            formatted["role"] = message.role
-            formatted["created_at"] = message.created_at.astimezone().strftime("%m/%d/%y, %I:%M %p")
-            content.append(formatted)
-
-        res = JSONResponse(content=content)
-        res.set_cookie("thread_id", thread_id)
-        res.set_cookie("agent_id", agent_id)
-        return res
-    except Exception as e:
-        logger.error(f"Error listing message: {e}")
-        raise HTTPException(status_code=500, detail=f"Error list message: {e}")
+        # También guardamos en cache global FAQ
+        faq_key = faq_cache_key(request_str)
+        set_cached_response(faq_key, full_message)
 
 @router.get("/agent")
 async def get_chat_agent(request: Request):
@@ -396,7 +329,6 @@ async def chat(
     app_insights_conn_str: Optional[str] = Depends(get_app_insights_conn_str),
     _ = auth_dependency
 ):
-    # Recuperar/crear thread
     thread_id = request.cookies.get("thread_id")
     agent_id = request.cookies.get("agent_id")
 
@@ -417,7 +349,6 @@ async def chat(
         thread_id = thread.id
         agent_id = agent.id
 
-        # Parsear input
         try:
             user_payload = await request.json()
             request_str: str = (user_payload.get("message") or "").strip()
@@ -435,50 +366,30 @@ async def chat(
             "X-Accel-Buffering": "no",
         }
 
-        # 1. Buscar en FAQ global
         faq_key = faq_cache_key(request_str)
         faq_cached = get_cached_response(faq_key)
         if faq_cached:
-            logger.info("Respuesta enviada desde FAQ cache")
             response = StreamingResponse(string_streamer(faq_cached), headers=headers, media_type="text/event-stream")
             response.set_cookie("thread_id", thread_id)
             response.set_cookie("agent_id", agent_id)
             return response
 
-        # 2. Buscar en cache local de thread
         key = cache_key(thread_id, request_str)
         cached = get_cached_response(key)
         if cached:
-            logger.info("Respuesta enviada desde cache local del thread")
             response = StreamingResponse(string_streamer(cached), headers=headers, media_type="text/event-stream")
         else:
-            logger.info("Enviando respuesta desde el agente")
             try:
-                await agent_client.messages.create(
-                    thread_id=thread_id,
-                    role="user",
-                    content=request_str
-                )
+                await agent_client.messages.create(thread_id=thread_id, role="user", content=request_str)
             except Exception as e:
-                logger.error(f"Error creating user message in thread: {e}")
                 raise HTTPException(status_code=500, detail=f"Error creating message: {e}")
 
             response = StreamingResponse(
-                get_result(
-                    request_str=request_str,
-                    request=request,
-                    thread_id=thread_id,
-                    agent_id=agent_id,
-                    ai_project=ai_project,
-                    app_insight_conn_str=app_insights_conn_str,
-                    carrier=carrier,
-                    cache_store_key=key
-                ),
+                get_result(request_str, request, thread_id, agent_id, ai_project, app_insights_conn_str, carrier, key),
                 headers=headers,
                 media_type="text/event-stream"
             )
 
-        # Persistir cookies
         response.set_cookie("thread_id", thread_id)
         response.set_cookie("agent_id", agent_id)
         return response
@@ -498,7 +409,6 @@ def run_agent_evaluation(
 ):
     if not app_insights_conn_str:
         return
-
     agent_evaluation_request = AgentEvaluationRequest(
         run_id=run_id,
         thread_id=thread_id,
@@ -513,11 +423,8 @@ def run_agent_evaluation(
         ),
         app_insights_connection_string=app_insights_conn_str,
     )
-
     def _run():
         try:
-            logger.info(f"Running agent evaluation on thread={thread_id} run={run_id}")
             ai_project.evaluations.create_agent_evaluation(evaluation=agent_evaluation_request)
         except Exception as e:
             logger.error(f"Error creating agent evaluation: {e}")
-
