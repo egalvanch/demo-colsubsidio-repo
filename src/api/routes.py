@@ -442,7 +442,7 @@ async def chat(
         faq_key = faq_cache_key(request_str)
         faq_cached = get_cached_response(faq_key)
         if faq_cached:
-            print("Respuesta encontrada en FAQ cache")
+            logger.info("Respuesta enviada desde FAQ cache")
             response = StreamingResponse(string_streamer(faq_cached), headers=headers, media_type="text/event-stream")
             response.set_cookie("thread_id", thread_id)
             response.set_cookie("agent_id", agent_id)
@@ -452,10 +452,10 @@ async def chat(
         key = cache_key(thread_id, request_str)
         cached = get_cached_response(key)
         if cached:
-            print("Respuesta encontrada en cache local de thread")
+            logger.info("Respuesta enviada desde cache local del thread")
             response = StreamingResponse(string_streamer(cached), headers=headers, media_type="text/event-stream")
         else:
-            print("Enviando respuesta desde el agente")
+            logger.info("Enviando respuesta desde el agente")
             try:
                 await agent_client.messages.create(
                     thread_id=thread_id,
