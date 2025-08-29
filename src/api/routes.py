@@ -118,7 +118,6 @@ def _init_redis_once() -> None:
             socket_connect_timeout=3,
             retry_on_timeout=True
         )
-        # Probar ping sin romper la petición
         try:
             _redis_client.ping()
             _CACHE_ENABLED = True
@@ -178,25 +177,23 @@ def set_cached_response(key: str, content: str, ttl: int = _CACHE_TTL) -> None:
         logger.warning(f"Redis SET failed for key={key}: {e}")
 
 # ------------------------------------------------------------------------------
-# FAQ precargadas desde JSON
+# FAQs globales en cache
 # ------------------------------------------------------------------------------
-FAQS_FILE = os.path.join(os.path.dirname(__file__), "faqs.json")
-
-def load_faqs() -> Dict[str, str]:
-    try:
-        with open(FAQS_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception as e:
-        logger.warning(f"No se pudo cargar faqs.json: {e}")
-        return {}
+# Diccionario fijo de FAQs iniciales
+INITIAL_FAQS: Dict[str, str] = {
+    "como me afilio a colsubsidio" : "¡Hola! Para afiliarte a Colsubsidio, puedes hacerlo fácilmente en línea. Aquí te dejo los pasos para que lo hagas sin complicaciones:\nIngresa a tu cuenta en el portal transaccional de Colsubsidio. Si no tienes cuenta, primero deberás crear una.\nSelecciona la opción \"Afiliar a beneficiario\" dentro del portal.\nDiligencia el formulario de afiliación con los datos correctos.\nFinaliza el proceso asegurándote de que toda la información sea correcta y haz clic en \"Afiliar\".\nTen en cuenta que debes tener a mano algunos documentos como el registro civil del beneficiario y la copia del documento de identidad. Si todo está en orden, recibirás un mensaje de confirmación una vez que tu afiliación sea exitosa. Si quieres más detalles, puedes visitar el siguiente enlace: Colsubsidio - Afiliaciones ¡Espero que esto te ayude! Si necesitas algo más, no dudes en preguntar. 😊",
+    "Que beneficios tengo en colsubsidio" : "Colsubsidio ofrece una variedad de beneficios para sus afiliados. Algunos de los más destacados incluyen:\n\n1. **Atención médica**: Acceso a servicios de salud, incluyendo consultas médicas, tratamientos y medicamentos a precios subsidiados.\n\n2. **Educación**: Oportunidades de formación y capacitación, así como subsidios para la educación de tus hijos.\n\n3. **Recreación**: Descuentos en actividades recreativas y culturales, así como acceso a instalaciones deportivas.\n\n4. **Asesoría legal**: Servicios de orientación y asesoría en temas legales y laborales.\n\n5. **Créditos y subsidios**: Posibilidad de acceder a créditos y subsidios para vivienda, educación y emprendimiento.\n\nPara más información sobre todos los beneficios disponibles, te recomiendo visitar el portal de Colsubsidio o comunicarte con su línea de atención al cliente. ¡Espero que esta información te sea útil! 😊",
+    "Que beneficios tengo":"Colsubsidio ofrece una variedad de beneficios para sus afiliados. Algunos de los más destacados incluyen:\n\n1. **Atención médica**: Acceso a servicios de salud, incluyendo consultas médicas, tratamientos y medicamentos a precios subsidiados.\n\n2. **Educación**: Oportunidades de formación y capacitación, así como subsidios para la educación de tus hijos.\n\n3. **Recreación**: Descuentos en actividades recreativas y culturales, así como acceso a instalaciones deportivas.\n\n4. **Asesoría legal**: Servicios de orientación y asesoría en temas legales y laborales.\n\n5. **Créditos y subsidios**: Posibilidad de acceder a créditos y subsidios para vivienda, educación y emprendimiento.\n\nPara más información sobre todos los beneficios disponibles, te recomiendo visitar el portal de Colsubsidio o comunicarte con su línea de atención al cliente. ¡Espero que esta información te sea útil! 😊",
+    "como me afilio":"¡Hola! Para afiliarte a Colsubsidio, puedes hacerlo fácilmente en línea. Aquí te dejo los pasos para que lo hagas sin complicaciones:\nIngresa a tu cuenta en el portal transaccional de Colsubsidio. Si no tienes cuenta, primero deberás crear una.\nSelecciona la opción \"Afiliar a beneficiario\" dentro del portal.\nDiligencia el formulario de afiliación con los datos correctos.\nFinaliza el proceso asegurándote de que toda la información sea correcta y haz clic en \"Afiliar\".\nTen en cuenta que debes tener a mano algunos documentos como el registro civil del beneficiario y la copia del documento de identidad. Si todo está en orden, recibirás un mensaje de confirmación una vez que tu afiliación sea exitosa. Si quieres más detalles, puedes visitar el siguiente enlace: Colsubsidio - Afiliaciones ¡Espero que esto te ayude! Si necesitas algo más, no dudes en preguntar. 😊"
+}
 
 def preload_faqs():
-    """Carga las FAQs desde JSON en Redis si no existen"""
+    """Carga las FAQs iniciales en Redis si no existen"""
     client = get_redis_client()
     if not client:
+        logger.warning("Redis no disponible, no se cargaron FAQs iniciales.")
         return
-    faqs = load_faqs()
-    for question, answer in faqs.items():
+    for question, answer in INITIAL_FAQS.items():
         key = faq_cache_key(question)
         if not client.exists(key):
             client.set(key, answer, ex=_CACHE_TTL)
@@ -221,7 +218,6 @@ def string_streamer(text: str):
 # ------------------------------------------------------------------------------
 async def get_message_and_annotations(agent_client: AgentsClient, message: ThreadMessage) -> Dict:
     annotations = []
-    # File citations
     for ann in (a.as_dict() for a in message.file_citation_annotations):
         file_id = ann["file_citation"]["file_id"]
         logger.info(f"Fetching file for annotation: {file_id}")
@@ -231,13 +227,10 @@ async def get_message_and_annotations(agent_client: AgentsClient, message: Threa
         except Exception as e:
             logger.warning(f"Could not fetch file name for file_id={file_id}: {e}")
         annotations.append(ann)
-
-    # URL citations
     for url_ann in message.url_citation_annotations:
         ann = url_ann.as_dict()
         ann["file_name"] = ann["url_citation"]["title"]
         annotations.append(ann)
-
     return {
         "content": message.text_messages[0].text.value if message.text_messages else "",
         "annotations": annotations
@@ -281,7 +274,6 @@ class MyEventHandler(AsyncAgentEventHandler[str]):
         return serialize_sse_event({"type": "stream_end"})
 
     async def on_run_step(self, step: RunStep) -> Optional[str]:
-        # Optional: log tool call details if present
         try:
             step_details = step.get("step_details", {})
             tool_calls = step_details.get("tool_calls", [])
@@ -296,6 +288,11 @@ class MyEventHandler(AsyncAgentEventHandler[str]):
 # ------------------------------------------------------------------------------
 # Routes
 # ------------------------------------------------------------------------------
+@router.on_event("startup")
+async def startup_event():
+    """Cargar FAQs iniciales en Redis al iniciar la app"""
+    preload_faqs()
+
 @router.get("/", response_class=HTMLResponse)
 async def index(request: Request, _ = auth_dependency):
     return templates.TemplateResponse("index.html", {"request": request})
