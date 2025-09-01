@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from typing import Optional, Dict, List
 from azure.search.documents import SearchClient
 from azure.core.credentials import AzureKeyCredential
-from azure.search.documents.models import VectorQuery
+from azure.search.documents.models import VectorizedQuery
 from azure.core.exceptions import HttpResponseError
 from azure.identity import DefaultAzureCredential
 import ssl
@@ -72,12 +72,13 @@ def hybrid_search(question: str, embedding: List[float], k: int = 3, threshold: 
     Realiza una búsqueda híbrida (texto + vector) en Azure AI Search.
     Devuelve la respuesta más relevante si supera el umbral.
     """
-    vector_query = VectorQuery(
-        k_nearest_neighbors=k,
-        fields="embedding",
+    # Crear VectorizedQuery con la sintaxis correcta para la versión 11.5.3
+    vector_query = VectorizedQuery(
         vector=embedding,
-        kind="vector"
+        k_nearest_neighbors=k,
+        fields="embedding"
     )
+    
     results = search_client.search(search_text=question, vector_queries=[vector_query], top=k)
     best_doc, best_score = None, float("-inf")
     for doc in results:
