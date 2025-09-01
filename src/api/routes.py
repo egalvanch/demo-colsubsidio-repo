@@ -6,7 +6,7 @@ import json
 import os
 import hashlib
 import logging
-from typing import AsyncGenerator, Optional, Dict
+from typing import AsyncGenerator, Optional, Dict, List, Optional
 
 import fastapi
 from fastapi import Request, Depends, HTTPException, status
@@ -34,6 +34,10 @@ from azure.ai.projects.models import (
 )
 
 import redis
+from pydantic import BaseModel
+import numpy as np
+import hashlib
+import httpx
 
 # ------------------------------------------------------------------------------
 # Logging
@@ -88,6 +92,178 @@ def get_agent(request: Request) -> Agent:
 
 def get_app_insights_conn_str(request: Request) -> Optional[str]:
     return getattr(request.app.state, "application_insights_connection_string", None)
+
+# ------------------------------------------------------------------------------
+# OpenAI / Azure OpenAI: client + helpers
+# ------------------------------------------------------------------------------
+AZURE_OPENAI_ENDPOINT = str(os.getenv("AZURE_OPENAI_ENDPOINT"))
+AZURE_OPENAI_KEY = str(os.getenv("AZURE_OPENAI_KEY"))
+AZURE_EMBEDDINGS_ENDPOINT = str(os.getenv("AZURE_EMBEDDINGS_ENDPOINT"))
+
+# Funciones auxiliares para caché semántico
+async def get_embedding(text: str) -> Optional[List[float]]:
+    """Genera embedding para el texto usando Azure OpenAI."""
+    payload = {"input": text}
+    headers = {
+        "api-key": AZURE_OPENAI_KEY,
+        "Content-Type": "application/json"
+    }
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.post(AZURE_EMBEDDINGS_ENDPOINT, json=payload, headers=headers)
+            data = response.json()
+            return data["data"][0]["embedding"] if "data" in data else None
+        except Exception as e:
+            print(f"Error generando embedding: {e}")
+            return None
+
+def cosine_similarity(vec1: List[float], vec2: List[float]) -> float:
+    """Calcula similitud coseno entre dos vectores."""
+    a = np.array(vec1)
+    b = np.array(vec2)
+    return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
+
+async def find_similar_cached_response(text: str, redis_client, similarity_threshold: float = 0.80) -> Optional[str]:
+    """Busca respuestas cacheadas similares usando embeddings."""
+    try:
+        print(f"[DEBUG] Buscando similares para: '{text[:50]}...'")
+        print(f"[DEBUG] Umbral de similitud: {similarity_threshold}")
+        
+        query_embedding = await get_embedding(text)
+        if not query_embedding:
+            print("[DEBUG] ❌ No se pudo generar embedding para la consulta")
+            return None
+        
+        print(f"[DEBUG] ✅ Embedding generado, longitud: {len(query_embedding)}")
+        
+        # Obtener todas las claves del caché semántico
+        cached_keys = redis_client.keys("semantic:*")
+        
+        print(f"[DEBUG] 📁 Claves encontradas en caché: {len(cached_keys)}")
+        print(f"Cached Keys: {cached_keys}")
+        
+        best_similarity = 0
+        best_response = None
+        similarities = []
+        
+        for i, key in enumerate(cached_keys):
+            cached_data = redis_client.get(key)
+            if cached_data:
+                cache_entry = json.loads(cached_data)
+                cached_embedding = cache_entry.get("embedding")
+                cached_text = cache_entry.get("text", "")[:50]
+                
+                if cached_embedding:
+                    similarity = cosine_similarity(query_embedding, cached_embedding)
+                    similarities.append((key, similarity, cached_text))
+                    print(f"[DEBUG] 🔍 #{i+1} Similitud: {similarity:.4f} | Texto: '{cached_text}...'")
+                    
+                    if similarity > best_similarity and similarity >= similarity_threshold:
+                        best_similarity = similarity
+                        best_response = cache_entry.get("response")
+                        print(f"[DEBUG] 🎯 ¡Nueva mejor coincidencia! Similitud: {similarity:.4f}")
+        
+        # Mostrar ranking de similitudes
+        similarities.sort(key=lambda x: x[1], reverse=True)
+        print(f"[DEBUG] 📊 Top 3 similitudes:")
+        for i, (key, sim, text) in enumerate(similarities[:3]):
+            print(f"[DEBUG]   {i+1}. {sim:.4f} - '{text}...'")
+        
+        if best_response:
+            print(f"[DEBUG] ✅ Respuesta encontrada con similitud: {best_similarity:.4f}")
+        else:
+            print(f"[DEBUG] ❌ No se encontró respuesta similar (mejor: {max([s[1] for s in similarities]) if similarities else 0:.4f})")
+        
+        return best_response
+    except Exception as e:
+        print(f"[DEBUG] 💥 Error buscando caché semántico: {e}")
+        return None
+
+async def cache_semantic_response(text: str, response: str) -> bool:
+    """Guarda respuesta con embedding en caché semántico."""
+    try:
+        embedding = await get_embedding(text)
+        if not embedding:
+            return False
+        
+        cache_entry = {
+            "text": text,
+            "response": response,
+            "embedding": embedding
+        }
+        
+        # Usar hash del texto como parte de la clave
+        text_hash = hashlib.sha256(text.encode('utf-8')).hexdigest()[:16]
+        cache_key = f"semantic:{text_hash}"
+        
+        redis_client = get_redis_client()
+        redis_client.set(cache_key, json.dumps(cache_entry), ex=3600)  # Expira en 1 hora
+        print(f"Cache guardado en caché semántico")
+        return True
+    except Exception as e:
+        print(f"Error guardando en caché semántico: {e}")
+        return False
+    
+async def use_semantic_cache(text: str, similarity_threshold: float = 0.80) -> Optional[str]:
+    redis_client = get_redis_client()
+    # Buscar respuesta similar en caché semántico
+    cached_answer = await find_similar_cached_response(text, redis_client)
+    print(f"[DEBUG] Respuesta cacheada: {cached_answer}, type: {type(cached_answer)}")
+    if cached_answer:
+        return cached_answer
+    
+    try:
+        print(f"[DEBUG] Buscando similares para: '{text[:50]}...'")
+        print(f"[DEBUG] Umbral de similitud: {similarity_threshold}")
+        query_embedding = await get_embedding(text)
+        if not query_embedding:
+            print("[DEBUG] ❌ No se pudo generar embedding para la consulta")
+            return None
+        print(f"[DEBUG] ✅ Embedding generado, longitud: {len(query_embedding)}")
+        
+        # Obtener todas las claves del caché semántico
+        cached_keys = redis_client.keys("semantic:*")
+        
+        print(f"[DEBUG] 📁 Claves encontradas en caché: {len(cached_keys)}")
+        print(f"Cached Keys: {cached_keys}")
+        
+        best_similarity = 0
+        best_response = None
+        similarities = []
+        
+        for i, key in enumerate(cached_keys):
+            cached_data = redis_client.get(key)
+            if cached_data:
+                cache_entry = json.loads(cached_data)
+                cached_embedding = cache_entry.get("embedding")
+                cached_text = cache_entry.get("text", "")[:50]
+                
+                if cached_embedding:
+                    similarity = cosine_similarity(query_embedding, cached_embedding)
+                    similarities.append((key, similarity, cached_text))
+                    print(f"[DEBUG] 🔍 #{i+1} Similitud: {similarity:.4f} | Texto: '{cached_text}...'")
+                    
+                    if similarity > best_similarity and similarity >= similarity_threshold:
+                        best_similarity = similarity
+                        best_response = cache_entry.get("response")
+                        print(f"[DEBUG] 🎯 ¡Nueva mejor coincidencia! Similitud: {similarity:.4f}")
+        
+        # Mostrar ranking de similitudes
+        similarities.sort(key=lambda x: x[1], reverse=True)
+        print(f"[DEBUG] 📊 Top 3 similitudes:")
+        for i, (key, sim, text) in enumerate(similarities[:3]):
+            print(f"[DEBUG]   {i+1}. {sim:.4f} - '{text}...'")
+        
+        if best_response:
+            print(f"[DEBUG] ✅ Respuesta encontrada con similitud: {best_similarity:.4f}")
+        else:
+            print(f"[DEBUG] ❌ No se encontró respuesta similar (mejor: {max([s[1] for s in similarities]) if similarities else 0:.4f})")
+        
+        return best_response
+    except Exception as e:
+        print(f"[DEBUG] 💥 Error buscando caché semántico: {e}")
+        return None
+    
 
 # ------------------------------------------------------------------------------
 # Redis: singleton client + helpers
@@ -312,6 +488,7 @@ async def get_result(
     # Guardar solo si no es fallback
     fallback_text = "¡Uy! No encontré esa info"
     if cache_store_key and full_message and not full_message.strip().startswith(fallback_text):
+        await cache_semantic_response(request_str, full_message)
         set_cached_response(cache_store_key, full_message)
         # También guardamos en cache global FAQ
         faq_key = faq_cache_key(request_str)
@@ -365,11 +542,21 @@ async def chat(
             "Content-Type": "text/event-stream",
             "X-Accel-Buffering": "no",
         }
+        
+        semantic_cache = await use_semantic_cache(request_str)
+        print(f"[DEBUG] Respuesta cacheada semántica: {semantic_cache}, type: {type(semantic_cache)}")
+        if (semantic_cache):
+            logger.info("Respuesta enviada desde Cache Semántico.")
+            response = StreamingResponse(string_streamer(semantic_cache), headers=headers, media_type="text/event-stream")
+            response.set_cookie("thread_id", thread_id)
+            response.set_cookie("agent_id", agent_id)
+            return response
 
         faq_key = faq_cache_key(request_str)
         faq_cached = get_cached_response(faq_key)
         if faq_cached:
             logger.info("Respuesta enviada desde Cache Global.")
+            await cache_semantic_response(request_str, faq_cached)
             response = StreamingResponse(string_streamer(faq_cached), headers=headers, media_type="text/event-stream")
             response.set_cookie("thread_id", thread_id)
             response.set_cookie("agent_id", agent_id)
@@ -379,6 +566,7 @@ async def chat(
         cached = get_cached_response(key)
         if cached:
             logger.info("Respuesta enviada desde Cache personal.")
+            await cache_semantic_response(request_str, cached)
             response = StreamingResponse(string_streamer(cached), headers=headers, media_type="text/event-stream")
         else:
             try:
