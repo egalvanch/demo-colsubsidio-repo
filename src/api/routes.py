@@ -33,7 +33,8 @@ from azure.ai.projects.models import (
    EvaluatorIds
 )
 
-import redis
+# Importar funciones del nuevo mecanismo de caché
+from .cache_ai_model import get_embedding, hybrid_search, upsert_qa
 
 # ------------------------------------------------------------------------------
 # Logging
@@ -90,84 +91,11 @@ def get_app_insights_conn_str(request: Request) -> Optional[str]:
     return getattr(request.app.state, "application_insights_connection_string", None)
 
 # ------------------------------------------------------------------------------
-# Redis: singleton client + helpers
+# Funciones de ayuda para búsqueda vectorial
 # ------------------------------------------------------------------------------
-_redis_client: Optional[redis.StrictRedis] = None
-_CACHE_ENABLED = False
-_CACHE_TTL = int(os.getenv("REDIS_CACHE_TTL", "86400"))  # 24h por defecto
-
-def _init_redis_once() -> None:
-    global _redis_client, _CACHE_ENABLED
-    if _redis_client is not None:
-        return
-    host = os.getenv("REDIS_HOST")
-    pwd = os.getenv("REDIS_PASSWORD")
-    port = os.getenv("REDIS_PORT")
-    if not (host and pwd and port):
-        logger.warning("Redis not fully configured (REDIS_HOST/PORT/PASSWORD). Cache disabled.")
-        _CACHE_ENABLED = False
-        _redis_client = None
-        return
-    try:
-        _redis_client = redis.StrictRedis(
-            host=str(host),
-            port=int(port),
-            password=str(pwd),
-            ssl=True,
-            socket_timeout=3,           # defensivo
-            socket_connect_timeout=3,   # defensivo
-            retry_on_timeout=True
-        )
-        # Probar ping sin romper la petición
-        try:
-            _redis_client.ping()
-            _CACHE_ENABLED = True
-            logger.info("Redis cache enabled.")
-        except Exception as ping_err:
-            logger.warning(f"Redis ping failed. Cache disabled. Err: {ping_err}")
-            _CACHE_ENABLED = False
-            _redis_client = None
-    except Exception as e:
-        logger.error(f"Error creating Redis client. Cache disabled. Err: {e}")
-        _CACHE_ENABLED = False
-        _redis_client = None
-
-def get_redis_client() -> Optional[redis.StrictRedis]:
-    if _redis_client is None:
-        _init_redis_once()
-    return _redis_client if _CACHE_ENABLED else None
-
 def normalize_message(text: str) -> str:
+    """Normaliza el mensaje para búsqueda consistente."""
     return (text or "").strip().lower()
-
-def cache_key(thread_id: str, user_message: str) -> str:
-    normalized = normalize_message(user_message)
-    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
-    return f"thread:{thread_id}:msg:{digest}"
-
-def get_cached_response(key: str) -> Optional[str]:
-    client = get_redis_client()
-    if not client:
-        return None
-    try:
-        raw = client.get(key)
-        if not raw:
-            return None
-        if isinstance(raw, bytes):
-            return raw.decode("utf-8")
-        return str(raw)
-    except Exception as e:
-        logger.warning(f"Redis GET failed for key={key}: {e}")
-        return None
-
-def set_cached_response(key: str, content: str, ttl: int = _CACHE_TTL) -> None:
-    client = get_redis_client()
-    if not client:
-        return
-    try:
-        client.set(key, content, ex=ttl)
-    except Exception as e:
-        logger.warning(f"Redis SET failed for key={key}: {e}")
 
 # ------------------------------------------------------------------------------
 # SSE helper
@@ -256,6 +184,7 @@ class MyEventHandler(AsyncAgentEventHandler[str]):
                 azure_ai_search_details = call.get("azure_ai_search", {})
                 if azure_ai_search_details:
                     logger.info(f"azure_ai_search input: {azure_ai_search_details.get('input')}")
+                    logger.info(f"azure_ai_search output: {azure_ai_search_details.get('output')}")
         except Exception:
             pass
         return None
@@ -275,9 +204,9 @@ async def get_result(
     ai_project: AIProjectClient,
     app_insight_conn_str: Optional[str],
     carrier: Dict[str, str],
-    cache_store_key: Optional[str] = None
+    should_store_answer: bool = True
 ) -> AsyncGenerator[str, None]:
-    """Streams the agent's response and caches the final assembled text."""
+    """Streams the agent's response y la almacena en Azure AI Search."""
     ctx = TraceContextTextMapPropagator().extract(carrier=carrier)
     full_message = ""
 
@@ -309,9 +238,14 @@ async def get_result(
             logger.exception(f"get_result: Exception: {e}")
             yield serialize_sse_event({"type": "error", "message": str(e)})
 
-    # Cachear al final
-    if cache_store_key and full_message:
-        set_cached_response(cache_store_key, full_message)
+    # Almacenar respuesta en Azure AI Search si es necesario
+    if should_store_answer and full_message:
+        try:
+            # Guardar la pregunta y respuesta en Azure AI Search
+            logger.info(f"Storing Q&A in Azure AI Search: question={request_str}")
+            upsert_qa(request_str, full_message)
+        except Exception as e:
+            logger.error(f"Error storing in Azure AI Search: {e}")
 
 @router.get("/chat/history")
 async def history(
@@ -398,10 +332,6 @@ async def chat(
         if not request_str:
             raise HTTPException(status_code=400, detail="Empty 'message' is not allowed.")
 
-        # Cache lookup
-        key = cache_key(thread_id, request_str)
-        cached = get_cached_response(key)
-
         headers = {
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
@@ -410,25 +340,62 @@ async def chat(
             "X-Accel-Buffering": "no",
         }
 
-        # Si hay caché, responder de inmediato
-        if cached:
-            logger.info(f"Cache hit for key={key}")
-            response = StreamingResponse(string_streamer(cached), headers=headers, media_type="text/event-stream")
-        else:
-            logger.info(f"Cache miss for key={key}. Creating user message and running stream.")
+        # Buscar en Azure AI Search usando embeddings
+        try:
+            # Generar embedding para la consulta
+            normalized_question = normalize_message(request_str)
+            embedding = get_embedding(normalized_question)
+            
+            # Buscar respuesta existente
+            cached_response = hybrid_search(normalized_question, embedding)
+            
+            if cached_response:
+                logger.info(f"AI Search cache hit for question: {normalized_question}")
+                response = StreamingResponse(string_streamer(cached_response), 
+                                            headers=headers, 
+                                            media_type="text/event-stream")
+            else:
+                logger.info(f"AI Search cache miss. Creating user message and running stream.")
+                
+                # Crear el mensaje del usuario en el thread
+                try:
+                    await agent_client.messages.create(
+                        thread_id=thread_id,
+                        role="user",
+                        content=request_str
+                    )
+                except Exception as e:
+                    logger.error(f"Error creating user message in thread: {e}")
+                    raise HTTPException(status_code=500, detail=f"Error creating message: {e}")
 
-            # IMPORTANTE: Crea el mensaje del usuario en el thread (estaba comentado en tu versión)
+                # Stream + almacenar en Azure AI Search al finalizar
+                response = StreamingResponse(
+                    get_result(
+                        request_str=request_str,
+                        request=request,
+                        thread_id=thread_id,
+                        agent_id=agent_id,
+                        ai_project=ai_project,
+                        app_insight_conn_str=app_insights_conn_str,
+                        carrier=carrier,
+                        should_store_answer=True
+                    ),
+                    headers=headers,
+                    media_type="text/event-stream"
+                )
+        except Exception as e:
+            logger.error(f"Error in Azure AI Search cache operation: {e}")
+            # Si hay error en la caché, continuar con la respuesta normal del agente
             try:
                 await agent_client.messages.create(
                     thread_id=thread_id,
                     role="user",
                     content=request_str
                 )
-            except Exception as e:
-                logger.error(f"Error creating user message in thread: {e}")
-                raise HTTPException(status_code=500, detail=f"Error creating message: {e}")
-
-            # Stream + cache al finalizar
+            except Exception as msg_e:
+                logger.error(f"Error creating user message in thread: {msg_e}")
+                raise HTTPException(status_code=500, detail=f"Error creating message: {msg_e}")
+                
             response = StreamingResponse(
                 get_result(
                     request_str=request_str,
@@ -438,7 +405,7 @@ async def chat(
                     ai_project=ai_project,
                     app_insight_conn_str=app_insights_conn_str,
                     carrier=carrier,
-                    cache_store_key=key
+                    should_store_answer=False  # No intentar almacenar si falló antes
                 ),
                 headers=headers,
                 media_type="text/event-stream"

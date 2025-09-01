@@ -3,7 +3,7 @@
   "contentVersion": "1.0.0.0",
   "parameters": {
     "environmentName": {
-      "value": "${AZURE_ENV_NAME=dev-cap-ai}"
+      "value": "${AZURE_ENV_NAME}"
     },
     "location": {
       "value": "${AZURE_LOCATION=eastus}"
@@ -12,34 +12,34 @@
       "value": "${AZURE_PRINCIPAL_ID=d3de1e28-5caa-43de-a87e-235fa3bc11b1}"
     },
     "resourceGroupName": {
-      "value": "${AZURE_RESOURCE_GROUP=rg-ai-agents-dev}"
+      "value": "${AZURE_RESOURCE_GROUP}"
     },
     "aiHubName": {
-      "value": "${AZURE_AIHUB_NAME=ai-hub-dev}"
+      "value": "${AZURE_AIHUB_NAME}"
     },
     "aiProjectName": {
-      "value": "${AZURE_AIPROJECT_NAME=ai-project-dev}"
+      "value": "${AZURE_AIPROJECT_NAME}"
     },
     "aiServicesName": {
-      "value": "${AZURE_AISERVICES_NAME=ai-services-dev}"
+      "value": "${AZURE_AISERVICES_NAME}"
     },
     "searchServiceName": {
-      "value": "${AZURE_SEARCH_SERVICE_NAME=search-service-dev}"
+      "value": "${AZURE_SEARCH_SERVICE_NAME}"
     },
     "applicationInsightsName": {
-      "value": "${AZURE_APPLICATION_INSIGHTS_NAME=application-insights-dev}"
+      "value": "${AZURE_APPLICATION_INSIGHTS_NAME}"
     },
     "containerRegistryName": {
-      "value": "${AZURE_CONTAINER_REGISTRY_NAME=container-registry-dev}"
+      "value": "${AZURE_CONTAINER_REGISTRY_NAME}"
     },
     "keyVaultName": {
-      "value": "${AZURE_KEYVAULT_NAME=key-vault-dev}"
+      "value": "${AZURE_KEYVAULT_NAME}"
     },
     "storageAccountName": {
-      "value": "${AZURE_STORAGE_ACCOUNT_NAME=storage-account-dev}"
+      "value": "${AZURE_STORAGE_ACCOUNT_NAME}"
     },
     "logAnalyticsWorkspaceName": {
-      "value": "${AZURE_LOG_ANALYTICS_WORKSPACE_NAME=log-analytics-workspace-dev}"
+      "value": "${AZURE_LOG_ANALYTICS_WORKSPACE_NAME}"
     },
     "useContainerRegistry": {
       "value": "${USE_CONTAINER_REGISTRY=true}"
