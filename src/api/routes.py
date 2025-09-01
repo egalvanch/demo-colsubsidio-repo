@@ -492,7 +492,8 @@ async def get_result(
         set_cached_response(cache_store_key, full_message)
         # También guardamos en cache global FAQ
         faq_key = faq_cache_key(request_str)
-        set_cached_response(faq_key, full_message)
+        #set_cached_response(faq_key, full_message)
+        save_thread_interaction(thread_id, request_str, full_message)
 
 @router.get("/chat/history")
 async def history(
@@ -533,11 +534,11 @@ async def history(
             formatteded_message['role'] = message.role
             formatteded_message['created_at'] = message.created_at.astimezone().strftime("%m/%d/%y, %I:%M %p")
             content.append(formatteded_message)
-                
-                                        
+
+
         logger.info(f"List message, thread ID: {thread_id}")
         response = JSONResponse(content=content)
-    
+
         # Update cookies to persist the thread and agent IDs.
         response.set_cookie("thread_id", thread_id)
         response.set_cookie("agent_id", agent_id)
@@ -676,6 +677,24 @@ async def get_azure_config(_ = auth_dependency):
 def read_file(path: str) -> str:
     with open(path, "r") as f:
         return f.read()
+    
+def save_thread_interaction(thread_id: str, user_message: str, content: str, role: str = "visitante") -> None:
+    client = get_redis_client()
+    if not client:
+        return
+    try:
+        key = f"thread:{thread_id}:rol:{role}"
+        existing = client.get(key)
+        interactions = []
+        if existing:
+            try:
+                interactions = json.loads(existing)
+            except Exception:
+                interactions = []
+        interactions.append({"user_message": user_message, "content": content})
+        client.set(key, json.dumps(interactions), ex=_CACHE_TTL)
+    except Exception as e:
+        logger.warning(f"Redis append interaction failed for key={key}: {e}")
 
 def run_agent_evaluation(
     thread_id: str,
