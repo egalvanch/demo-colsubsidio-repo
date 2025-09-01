@@ -369,6 +369,7 @@ async def chat(
         faq_key = faq_cache_key(request_str)
         faq_cached = get_cached_response(faq_key)
         if faq_cached:
+            logger.info("Respuesta enviada desde Cache Global.")
             response = StreamingResponse(string_streamer(faq_cached), headers=headers, media_type="text/event-stream")
             response.set_cookie("thread_id", thread_id)
             response.set_cookie("agent_id", agent_id)
@@ -377,13 +378,14 @@ async def chat(
         key = cache_key(thread_id, request_str)
         cached = get_cached_response(key)
         if cached:
+            logger.info("Respuesta enviada desde Cache personal.")
             response = StreamingResponse(string_streamer(cached), headers=headers, media_type="text/event-stream")
         else:
             try:
                 await agent_client.messages.create(thread_id=thread_id, role="user", content=request_str)
             except Exception as e:
                 raise HTTPException(status_code=500, detail=f"Error creating message: {e}")
-
+            logger.info("Respuesta generada desde agente.")
             response = StreamingResponse(
                 get_result(request_str, request, thread_id, agent_id, ai_project, app_insights_conn_str, carrier, key),
                 headers=headers,
