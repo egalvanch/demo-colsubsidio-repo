@@ -494,6 +494,58 @@ async def get_result(
         faq_key = faq_cache_key(request_str)
         set_cached_response(faq_key, full_message)
 
+@router.get("/chat/history")
+async def history(
+    request: Request,
+    ai_project : AIProjectClient = Depends(get_ai_project),
+    agent : Agent = Depends(get_agent),
+	_ = auth_dependency
+):
+    with tracer.start_as_current_span("chat_history"):
+        # Retrieve the thread ID from the cookies (if available).
+        thread_id = request.cookies.get('thread_id')
+        agent_id = request.cookies.get('agent_id')
+
+        # Attempt to get an existing thread. If not found, create a new one.
+        try:
+            agent_client = ai_project.agents
+            if thread_id and agent_id == agent.id:
+                logger.info(f"Retrieving thread with ID {thread_id}")
+                thread = await agent_client.threads.get(thread_id)
+            else:
+                logger.info("Creating a new thread")
+                thread = await agent_client.threads.create()
+        except Exception as e:
+            logger.error(f"Error handling thread: {e}")
+            raise HTTPException(status_code=400, detail=f"Error handling thread: {e}")
+
+        thread_id = thread.id
+        agent_id = agent.id
+
+    # Create a new message from the user's input.
+    try:
+        content = []
+        response = agent_client.messages.list(
+            thread_id=thread_id,
+        )
+        async for message in response:
+            formatteded_message = await get_message_and_annotations(agent_client, message)
+            formatteded_message['role'] = message.role
+            formatteded_message['created_at'] = message.created_at.astimezone().strftime("%m/%d/%y, %I:%M %p")
+            content.append(formatteded_message)
+                
+                                        
+        logger.info(f"List message, thread ID: {thread_id}")
+        response = JSONResponse(content=content)
+    
+        # Update cookies to persist the thread and agent IDs.
+        response.set_cookie("thread_id", thread_id)
+        response.set_cookie("agent_id", agent_id)
+        return response
+    except Exception as e:
+        logger.error(f"Error listing message: {e}")
+        raise HTTPException(status_code=500, detail=f"Error list message: {e}")
+
 @router.get("/agent")
 async def get_chat_agent(request: Request):
     return JSONResponse(content=get_agent(request).as_dict())
@@ -542,11 +594,14 @@ async def chat(
             "Content-Type": "text/event-stream",
             "X-Accel-Buffering": "no",
         }
+        key = cache_key(thread_id, request_str)
+        cached = get_cached_response(key)
         
         semantic_cache = await use_semantic_cache(request_str)
         print(f"[DEBUG] Respuesta cacheada semántica: {semantic_cache}, type: {type(semantic_cache)}")
         if (semantic_cache):
             logger.info("Respuesta enviada desde Cache Semántico.")
+            set_cached_response(key, semantic_cache)
             response = StreamingResponse(string_streamer(semantic_cache), headers=headers, media_type="text/event-stream")
             response.set_cookie("thread_id", thread_id)
             response.set_cookie("agent_id", agent_id)
@@ -562,8 +617,7 @@ async def chat(
             response.set_cookie("agent_id", agent_id)
             return response
 
-        key = cache_key(thread_id, request_str)
-        cached = get_cached_response(key)
+
         if cached:
             logger.info("Respuesta enviada desde Cache personal.")
             await cache_semantic_response(request_str, cached)
@@ -583,6 +637,38 @@ async def chat(
         response.set_cookie("thread_id", thread_id)
         response.set_cookie("agent_id", agent_id)
         return response
+@router.get("/config/azure")
+async def get_azure_config(_ = auth_dependency):
+    """Get Azure configuration for frontend use"""
+    try:
+        subscription_id = os.environ.get("AZURE_SUBSCRIPTION_ID", "")
+        tenant_id = os.environ.get("AZURE_TENANT_ID", "")
+        resource_group = os.environ.get("AZURE_RESOURCE_GROUP", "")
+        ai_project_resource_id = os.environ.get("AZURE_EXISTING_AIPROJECT_RESOURCE_ID", "")
+        
+        # Extract resource name and project name from the resource ID
+        # Format: /subscriptions/{sub}/resourceGroups/{rg}/providers/Microsoft.CognitiveServices/accounts/{resource}/projects/{project}
+        resource_name = ""
+        project_name = ""
+        
+        if ai_project_resource_id:
+            parts = ai_project_resource_id.split("/")
+            if len(parts) >= 8:
+                resource_name = parts[8]  # accounts/{resource_name}
+            if len(parts) >= 10:
+                project_name = parts[10]  # projects/{project_name}
+        
+        return JSONResponse({
+            "subscriptionId": subscription_id,
+            "tenantId": tenant_id,
+            "resourceGroup": resource_group,
+            "resourceName": resource_name,
+            "projectName": project_name,
+            "wsid": ai_project_resource_id
+        })
+    except Exception as e:
+        logger.error(f"Error getting Azure config: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get Azure configuration")
 
 # ------------------------------------------------------------------------------
 # Utilities
