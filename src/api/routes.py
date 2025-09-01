@@ -114,11 +114,10 @@ def _init_redis_once() -> None:
             port=int(port),
             password=str(pwd),
             ssl=True,
-            socket_timeout=3,           # defensivo
-            socket_connect_timeout=3,   # defensivo
+            socket_timeout=3,
+            socket_connect_timeout=3,
             retry_on_timeout=True
         )
-        # Probar ping sin romper la petición
         try:
             _redis_client.ping()
             _CACHE_ENABLED = True
@@ -137,6 +136,9 @@ def get_redis_client() -> Optional[redis.StrictRedis]:
         _init_redis_once()
     return _redis_client if _CACHE_ENABLED else None
 
+# ------------------------------------------------------------------------------
+# Cache helpers
+# ------------------------------------------------------------------------------
 def normalize_message(text: str) -> str:
     return (text or "").strip().lower()
 
@@ -144,6 +146,11 @@ def cache_key(thread_id: str, user_message: str) -> str:
     normalized = normalize_message(user_message)
     digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
     return f"thread:{thread_id}:msg:{digest}"
+
+def faq_cache_key(user_message: str) -> str:
+    normalized = normalize_message(user_message)
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+    return f"faq:msg:{digest}"
 
 def get_cached_response(key: str) -> Optional[str]:
     client = get_redis_client()
@@ -170,6 +177,22 @@ def set_cached_response(key: str, content: str, ttl: int = _CACHE_TTL) -> None:
         logger.warning(f"Redis SET failed for key={key}: {e}")
 
 # ------------------------------------------------------------------------------
+# FAQs iniciales en cache
+# ------------------------------------------------------------------------------
+INITIAL_FAQS: Dict[str, str] = {}
+
+def preload_faqs():
+    client = get_redis_client()
+    if not client:
+        logger.warning("Redis no disponible, no se cargaron FAQs iniciales.")
+        return
+    for question, answer in INITIAL_FAQS.items():
+        key = faq_cache_key(question)
+        if not client.exists(key):
+            client.set(key, answer, ex=_CACHE_TTL)
+            logger.info(f"FAQ precargada en cache: {question}")
+
+# ------------------------------------------------------------------------------
 # SSE helper
 # ------------------------------------------------------------------------------
 def serialize_sse_event(data: Dict) -> str:
@@ -188,23 +211,18 @@ def string_streamer(text: str):
 # ------------------------------------------------------------------------------
 async def get_message_and_annotations(agent_client: AgentsClient, message: ThreadMessage) -> Dict:
     annotations = []
-    # File citations
     for ann in (a.as_dict() for a in message.file_citation_annotations):
         file_id = ann["file_citation"]["file_id"]
-        logger.info(f"Fetching file for annotation: {file_id}")
         try:
             openai_file = await agent_client.files.get(file_id)
             ann["file_name"] = openai_file.filename
         except Exception as e:
             logger.warning(f"Could not fetch file name for file_id={file_id}: {e}")
         annotations.append(ann)
-
-    # URL citations
     for url_ann in message.url_citation_annotations:
         ann = url_ann.as_dict()
         ann["file_name"] = ann["url_citation"]["title"]
         annotations.append(ann)
-
     return {
         "content": message.text_messages[0].text.value if message.text_messages else "",
         "annotations": annotations
@@ -218,19 +236,14 @@ class MyEventHandler(AsyncAgentEventHandler[str]):
         self.app_insights_conn_str = app_insights_conn_str or ""
 
     async def on_message_delta(self, delta: MessageDeltaChunk) -> Optional[str]:
-        stream_data = {"content": delta.text, "type": "message"}
-        return serialize_sse_event(stream_data)
+        return serialize_sse_event({"content": delta.text, "type": "message"})
 
     async def on_thread_message(self, message: ThreadMessage) -> Optional[str]:
-        try:
-            if message.status != "completed":
-                return None
-            stream_data = await get_message_and_annotations(self.agent_client, message)
-            stream_data["type"] = "completed_message"
-            return serialize_sse_event(stream_data)
-        except Exception as e:
-            logger.error(f"Error in on_thread_message: {e}", exc_info=True)
+        if message.status != "completed":
             return None
+        stream_data = await get_message_and_annotations(self.agent_client, message)
+        stream_data["type"] = "completed_message"
+        return serialize_sse_event(stream_data)
 
     async def on_thread_run(self, run: ThreadRun) -> Optional[str]:
         stream_data = {"content": f"ThreadRun status: {run.status}, thread ID: {run.thread_id}", "type": "thread_run"}
@@ -247,22 +260,13 @@ class MyEventHandler(AsyncAgentEventHandler[str]):
     async def on_done(self) -> Optional[str]:
         return serialize_sse_event({"type": "stream_end"})
 
-    async def on_run_step(self, step: RunStep) -> Optional[str]:
-        # Optional: log tool call details if present
-        try:
-            step_details = step.get("step_details", {})
-            tool_calls = step_details.get("tool_calls", [])
-            for call in tool_calls:
-                azure_ai_search_details = call.get("azure_ai_search", {})
-                if azure_ai_search_details:
-                    logger.info(f"azure_ai_search input: {azure_ai_search_details.get('input')}")
-        except Exception:
-            pass
-        return None
-
 # ------------------------------------------------------------------------------
 # Routes
 # ------------------------------------------------------------------------------
+@router.on_event("startup")
+async def startup_event():
+    preload_faqs()
+
 @router.get("/", response_class=HTMLResponse)
 async def index(request: Request, _ = auth_dependency):
     return templates.TemplateResponse("index.html", {"request": request})
@@ -277,7 +281,6 @@ async def get_result(
     carrier: Dict[str, str],
     cache_store_key: Optional[str] = None
 ) -> AsyncGenerator[str, None]:
-    """Streams the agent's response and caches the final assembled text."""
     ctx = TraceContextTextMapPropagator().extract(carrier=carrier)
     full_message = ""
 
@@ -290,69 +293,29 @@ async def get_result(
                 event_handler=MyEventHandler(ai_project, app_insight_conn_str),
             )
             async with stream_cm as stream:
-                # Informar inicio de stream
                 yield serialize_sse_event({"type": "info", "message": "stream started"})
                 async for event in stream:
                     _, _, event_func_return_val = event
                     if not event_func_return_val:
                         continue
-                    # Acumular texto de chunks "message"
                     try:
                         data = json.loads(event_func_return_val.replace("data: ", "").strip())
                         if data.get("type") == "message" and "content" in data:
                             full_message += data["content"]
                     except Exception:
-                        # No bloquea el stream si no se pudo parsear un chunk
                         pass
                     yield event_func_return_val
         except Exception as e:
             logger.exception(f"get_result: Exception: {e}")
             yield serialize_sse_event({"type": "error", "message": str(e)})
 
-    # Cachear al final
-    if cache_store_key and full_message:
+    # Guardar solo si no es fallback
+    fallback_text = "¡Uy! No encontré esa info"
+    if cache_store_key and full_message and not full_message.strip().startswith(fallback_text):
         set_cached_response(cache_store_key, full_message)
-
-@router.get("/chat/history")
-async def history(
-    request: Request,
-    ai_project: AIProjectClient = Depends(get_ai_project),
-    agent: Agent = Depends(get_agent),
-    _ = auth_dependency
-):
-    with tracer.start_as_current_span("chat_history"):
-        thread_id = request.cookies.get("thread_id")
-        agent_id = request.cookies.get("agent_id")
-
-        try:
-            agent_client = ai_project.agents
-            if thread_id and agent_id == agent.id:
-                thread = await agent_client.threads.get(thread_id)
-            else:
-                thread = await agent_client.threads.create()
-        except Exception as e:
-            logger.error(f"Error handling thread: {e}")
-            raise HTTPException(status_code=400, detail=f"Error handling thread: {e}")
-
-        thread_id = thread.id
-        agent_id = agent.id
-
-    try:
-        content = []
-        response = agent_client.messages.list(thread_id=thread_id)
-        async for message in response:
-            formatted = await get_message_and_annotations(agent_client, message)
-            formatted["role"] = message.role
-            formatted["created_at"] = message.created_at.astimezone().strftime("%m/%d/%y, %I:%M %p")
-            content.append(formatted)
-
-        res = JSONResponse(content=content)
-        res.set_cookie("thread_id", thread_id)
-        res.set_cookie("agent_id", agent_id)
-        return res
-    except Exception as e:
-        logger.error(f"Error listing message: {e}")
-        raise HTTPException(status_code=500, detail=f"Error list message: {e}")
+        # También guardamos en cache global FAQ
+        faq_key = faq_cache_key(request_str)
+        set_cached_response(faq_key, full_message)
 
 @router.get("/agent")
 async def get_chat_agent(request: Request):
@@ -366,7 +329,6 @@ async def chat(
     app_insights_conn_str: Optional[str] = Depends(get_app_insights_conn_str),
     _ = auth_dependency
 ):
-    # Recuperar/crear thread
     thread_id = request.cookies.get("thread_id")
     agent_id = request.cookies.get("agent_id")
 
@@ -387,7 +349,6 @@ async def chat(
         thread_id = thread.id
         agent_id = agent.id
 
-        # Parsear input
         try:
             user_payload = await request.json()
             request_str: str = (user_payload.get("message") or "").strip()
@@ -398,53 +359,39 @@ async def chat(
         if not request_str:
             raise HTTPException(status_code=400, detail="Empty 'message' is not allowed.")
 
-        # Cache lookup
-        key = cache_key(thread_id, request_str)
-        cached = get_cached_response(key)
-
         headers = {
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
             "Content-Type": "text/event-stream",
-            # Opcional: evita buffering en proxies reversos como Nginx
             "X-Accel-Buffering": "no",
         }
 
-        # Si hay caché, responder de inmediato
+        faq_key = faq_cache_key(request_str)
+        faq_cached = get_cached_response(faq_key)
+        if faq_cached:
+            logger.info("Respuesta enviada desde Cache Global.")
+            response = StreamingResponse(string_streamer(faq_cached), headers=headers, media_type="text/event-stream")
+            response.set_cookie("thread_id", thread_id)
+            response.set_cookie("agent_id", agent_id)
+            return response
+
+        key = cache_key(thread_id, request_str)
+        cached = get_cached_response(key)
         if cached:
-            logger.info(f"Cache hit for key={key}")
+            logger.info("Respuesta enviada desde Cache personal.")
             response = StreamingResponse(string_streamer(cached), headers=headers, media_type="text/event-stream")
         else:
-            logger.info(f"Cache miss for key={key}. Creating user message and running stream.")
-
-            # IMPORTANTE: Crea el mensaje del usuario en el thread (estaba comentado en tu versión)
             try:
-                await agent_client.messages.create(
-                    thread_id=thread_id,
-                    role="user",
-                    content=request_str
-                )
+                await agent_client.messages.create(thread_id=thread_id, role="user", content=request_str)
             except Exception as e:
-                logger.error(f"Error creating user message in thread: {e}")
                 raise HTTPException(status_code=500, detail=f"Error creating message: {e}")
-
-            # Stream + cache al finalizar
+            logger.info("Respuesta generada desde agente.")
             response = StreamingResponse(
-                get_result(
-                    request_str=request_str,
-                    request=request,
-                    thread_id=thread_id,
-                    agent_id=agent_id,
-                    ai_project=ai_project,
-                    app_insight_conn_str=app_insights_conn_str,
-                    carrier=carrier,
-                    cache_store_key=key
-                ),
+                get_result(request_str, request, thread_id, agent_id, ai_project, app_insights_conn_str, carrier, key),
                 headers=headers,
                 media_type="text/event-stream"
             )
 
-        # Persistir cookies
         response.set_cookie("thread_id", thread_id)
         response.set_cookie("agent_id", agent_id)
         return response
@@ -464,7 +411,6 @@ def run_agent_evaluation(
 ):
     if not app_insights_conn_str:
         return
-
     agent_evaluation_request = AgentEvaluationRequest(
         run_id=run_id,
         thread_id=thread_id,
@@ -479,12 +425,8 @@ def run_agent_evaluation(
         ),
         app_insights_connection_string=app_insights_conn_str,
     )
-
     def _run():
         try:
-            logger.info(f"Running agent evaluation on thread={thread_id} run={run_id}")
             ai_project.evaluations.create_agent_evaluation(evaluation=agent_evaluation_request)
         except Exception as e:
             logger.error(f"Error creating agent evaluation: {e}")
-
-    _run()
