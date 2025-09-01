@@ -6,6 +6,13 @@ from azure.search.documents import SearchClient
 from azure.core.credentials import AzureKeyCredential
 from azure.search.documents.models import VectorQuery
 from azure.core.exceptions import HttpResponseError
+from azure.identity import DefaultAzureCredential
+import ssl
+import certifi
+
+# Configurar certificados usando certifi
+os.environ['REQUESTS_CA_BUNDLE'] = certifi.where()
+os.environ['SSL_CERT_FILE'] = certifi.where()
 
 # ===========================
 # Configuración desde .env
@@ -15,11 +22,15 @@ EMBEDDING_DEPLOYMENT = os.getenv("AZURE_AI_EMBED_DEPLOYMENT_NAME")
 SEARCH_ENDPOINT = os.getenv("AZURE_AI_SEARCH_ENDPOINT")
 INDEX_NAME = os.getenv("AZURE_AI_SEARCH_INDEX_NAME")
 SEARCH_API_KEY = os.getenv("AZURE_AI_SEARCH_API_KEY")
+AZURE_TARGET_EMBED_URI = os.getenv("AZURE_TARGET_EMBED_URI")
 
-if not all([AI_PROJECT_ENDPOINT, EMBEDDING_DEPLOYMENT, SEARCH_ENDPOINT, INDEX_NAME, SEARCH_API_KEY]):
-    raise ValueError("Faltan variables de entorno requeridas para Azure AI Search o AI Project.")
+if not all([SEARCH_ENDPOINT, INDEX_NAME, SEARCH_API_KEY, AZURE_TARGET_EMBED_URI]):
+    raise ValueError("Faltan variables de entorno requeridas para Azure AI Search o embeddings.")
 
 # Cliente de Azure AI Search
+if not SEARCH_ENDPOINT or not INDEX_NAME or not SEARCH_API_KEY:
+    raise ValueError("Variables de entorno de Azure AI Search no configuradas correctamente")
+
 search_client = SearchClient(
     endpoint=SEARCH_ENDPOINT,
     index_name=INDEX_NAME,
@@ -32,25 +43,41 @@ search_client = SearchClient(
 
 def get_embedding(text: str) -> List[float]:
     """
-    Genera un embedding usando el deployment configurado en el AI Project.
+    Genera un embedding usando el deployment configurado en Azure OpenAI.
     """
-    url = f"{AI_PROJECT_ENDPOINT}/openai/deployments/{EMBEDDING_DEPLOYMENT}/embeddings?api-version=2023-05-15"
-    headers = {
-        "Content-Type": "application/json",
-        # Ajusta la autenticación según tu configuración (Managed Identity o API Key)
-        "Authorization": f"Bearer {os.getenv('AZURE_CLIENT_SECRET')}"
-    }
-    payload = {"input": text}
-    response = requests.post(url, headers=headers, json=payload)
-    response.raise_for_status()
-    return response.json()["data"][0]["embedding"]
+    try:
+        # Verificar que el URI esté configurado
+        if not AZURE_TARGET_EMBED_URI:
+            raise ValueError("AZURE_TARGET_EMBED_URI no está configurado")
+        
+        # Usar DefaultAzureCredential para obtener un token válido
+        credential = DefaultAzureCredential()
+        token = credential.get_token("https://cognitiveservices.azure.com/.default")
+        
+        # Usar el URI completo desde las variables de entorno
+        url = AZURE_TARGET_EMBED_URI
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {token.token}"
+        }
+        payload = {"input": text}
+        response = requests.post(url, headers=headers, json=payload)
+        response.raise_for_status()
+        return response.json()["data"][0]["embedding"]
+    except Exception as e:
+        raise Exception(f"Error generando embedding: {e}")
 
 def hybrid_search(question: str, embedding: List[float], k: int = 3, threshold: float = 0.0331) -> Optional[str]:
     """
     Realiza una búsqueda híbrida (texto + vector) en Azure AI Search.
     Devuelve la respuesta más relevante si supera el umbral.
     """
-    vector_query = VectorQuery(vector=embedding, fields="embedding", k_nearest_neighbors=k)
+    vector_query = VectorQuery(
+        k_nearest_neighbors=k,
+        fields="embedding",
+        vector=embedding,
+        kind="vector"
+    )
     results = search_client.search(search_text=question, vector_queries=[vector_query], top=k)
     best_doc, best_score = None, float("-inf")
     for doc in results:
