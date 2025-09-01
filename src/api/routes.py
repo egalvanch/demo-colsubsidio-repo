@@ -493,6 +493,7 @@ async def get_result(
         # También guardamos en cache global FAQ
         faq_key = faq_cache_key(request_str)
         set_cached_response(faq_key, full_message)
+
 @router.get("/chat/history")
 async def history(
     request: Request,
@@ -559,8 +560,6 @@ async def chat(
 ):
     thread_id = request.cookies.get("thread_id")
     agent_id = request.cookies.get("agent_id")
-    print("thread_id:", thread_id)
-    print("agent_id:", agent_id)
 
     with tracer.start_as_current_span("chat_request"):
         carrier: Dict[str, str] = {}
