@@ -60,6 +60,7 @@ security = HTTPBasic()
 username = os.getenv("WEB_APP_USERNAME")
 password = os.getenv("WEB_APP_PASSWORD")
 basic_auth = bool(username and password)
+threshold = float(os.getenv("AUTH_THRESHOLD", "0.65"))
 
 def authenticate(credentials: Optional[HTTPBasicCredentials] = Depends(security)) -> None:
     if not basic_auth:
@@ -123,7 +124,7 @@ def cosine_similarity(vec1: List[float], vec2: List[float]) -> float:
     b = np.array(vec2)
     return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
 
-async def find_similar_cached_response(text: str, redis_client, similarity_threshold: float = 0.80) -> Optional[str]:
+async def find_similar_cached_response(text: str, redis_client, similarity_threshold: float = threshold) -> Optional[str]:
     """Busca respuestas cacheadas similares usando embeddings."""
     try:
         print(f"[DEBUG] Buscando similares para: '{text[:50]}...'")
@@ -203,8 +204,8 @@ async def cache_semantic_response(text: str, response: str) -> bool:
     except Exception as e:
         print(f"Error guardando en caché semántico: {e}")
         return False
-    
-async def use_semantic_cache(text: str, similarity_threshold: float = 0.80) -> Optional[str]:
+
+async def use_semantic_cache(text: str, similarity_threshold: float = threshold) -> Optional[str]:
     redis_client = get_redis_client()
     # Buscar respuesta similar en caché semántico
     cached_answer = await find_similar_cached_response(text, redis_client)
@@ -485,9 +486,10 @@ async def get_result(
             logger.exception(f"get_result: Exception: {e}")
             yield serialize_sse_event({"type": "error", "message": str(e)})
 
-    # Guardar solo si no es fallback
-    fallback_text = "¡Uy! No encontré esa info"
-    if cache_store_key and full_message and not full_message.strip().startswith(fallback_text):
+
+    errores = ["No se ha encontrado", "No he podido encontrar", "No puedo ayudarte con eso"]
+    es_fallback = any(err in full_message for err in errores)
+    if cache_store_key and full_message and not es_fallback:
         await cache_semantic_response(request_str, full_message)
         set_cached_response(cache_store_key, full_message)
         # También guardamos en cache global FAQ
@@ -610,6 +612,7 @@ async def chat(
 
         faq_key = faq_cache_key(request_str)
         faq_cached = get_cached_response(faq_key)
+
         if faq_cached:
             logger.info("Respuesta enviada desde Cache Global.")
             await cache_semantic_response(request_str, faq_cached)
