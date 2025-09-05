@@ -280,6 +280,7 @@ def _init_redis_once() -> None:
     host = os.getenv("REDIS_HOST")
     pwd = os.getenv("REDIS_PASSWORD")
     port = os.getenv("REDIS_PORT")
+    db = os.getenv("REDIS_DB")
     if not (host and pwd and port):
         logger.warning("Redis not fully configured (REDIS_HOST/PORT/PASSWORD). Cache disabled.")
         _CACHE_ENABLED = False
@@ -297,6 +298,7 @@ def _init_redis_once() -> None:
         )
         try:
             _redis_client.ping()
+            _redis_client.select(int(db) if db and db.isdigit() else 0)
             _CACHE_ENABLED = True
             logger.info("Redis cache enabled.")
         except Exception as ping_err:
