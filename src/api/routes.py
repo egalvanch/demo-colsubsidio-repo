@@ -299,7 +299,7 @@ def _init_redis_once() -> None:
         )
         try:
             _redis_client.ping()
-            _redis_client.select(int(db) if db and db.isdigit() else 0)
+            _redis_client.select(int(db) if db else 0)
             _CACHE_ENABLED = True
             logger.info("Redis cache enabled.")
         except Exception as ping_err:
