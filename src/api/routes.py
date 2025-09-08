@@ -6,6 +6,7 @@ import json
 import os
 import hashlib
 import logging
+import re
 from typing import AsyncGenerator, Optional, Dict, List, Optional
 
 import fastapi
@@ -198,7 +199,7 @@ async def cache_semantic_response(text: str, response: str) -> bool:
         cache_key = f"semantic:{text_hash}"
         
         redis_client = get_redis_client()
-        redis_client.set(cache_key, json.dumps(cache_entry), ex=3600)  # Expira en 1 hora
+        redis_client.set(cache_key, json.dumps(cache_entry), ex=_CACHE_TTL)
         print(f"Cache guardado en caché semántico")
         return True
     except Exception as e:
@@ -406,6 +407,15 @@ async def get_message_and_annotations(agent_client: AgentsClient, message: Threa
         "content": message.text_messages[0].text.value if message.text_messages else "",
         "annotations": annotations
     }
+    
+# ------------------------------------------------------------------------------
+# Custom String treatment for Agent events
+# ------------------------------------------------------------------------------
+def clear_text(text: str) -> str:
+    text = text.strip().lower()
+    text = re.sub(r'[^a-zA-Z0-9 ]', '', text)
+    print(f"[DEBUG] Mensaje recibido: '{text}'")
+    return text
 
 class MyEventHandler(AsyncAgentEventHandler[str]):
     def __init__(self, ai_project: AIProjectClient, app_insights_conn_str: Optional[str]):
@@ -585,7 +595,7 @@ async def chat(
 
         try:
             user_payload = await request.json()
-            request_str: str = (user_payload.get("message") or "").strip()
+            request_str = clear_text(user_payload.get("message") or "")
         except Exception as e:
             logger.error(f"Invalid JSON in request: {e}")
             raise HTTPException(status_code=400, detail=f"Invalid JSON in request: {e}")
