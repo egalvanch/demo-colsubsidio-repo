@@ -301,7 +301,7 @@ def _init_redis_once() -> None:
             _redis_client.ping()
             _redis_client.select(int(db) if db else 0)
             _CACHE_ENABLED = True
-            logger.info("Redis cache enabled.")
+            logger.info(f"Redis cache enabled. DB: {db}")
         except Exception as ping_err:
             logger.warning(f"Redis ping failed. Cache disabled. Err: {ping_err}")
             _CACHE_ENABLED = False
