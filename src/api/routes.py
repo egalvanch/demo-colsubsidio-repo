@@ -282,6 +282,7 @@ def _init_redis_once() -> None:
     pwd = os.getenv("REDIS_PASSWORD")
     port = os.getenv("REDIS_PORT")
     db = os.getenv("REDIS_DB")
+    print(f"[DEBUG] Redis config - Host: {host}, Port: {port}, DB: {db}")
     if not (host and pwd and port):
         logger.warning("Redis not fully configured (REDIS_HOST/PORT/PASSWORD). Cache disabled.")
         _CACHE_ENABLED = False
@@ -293,13 +294,13 @@ def _init_redis_once() -> None:
             port=int(port),
             password=str(pwd),
             ssl=True,
+            db=int(db) if db else 0,
             socket_timeout=3,
             socket_connect_timeout=3,
             retry_on_timeout=True
         )
         try:
             _redis_client.ping()
-            _redis_client.select(int(db) if db else 0)
             _CACHE_ENABLED = True
             logger.info(f"Redis cache enabled. DB: {db}")
         except Exception as ping_err:
